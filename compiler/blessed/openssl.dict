@@ -1,0 +1,45 @@
+# Auto-generated blessed stub for OpenSSL 3.x (libssl + libcrypto)
+# Source header : <openssl/evp.h>, <openssl/rand.h>, <openssl/sha.h>
+# link          : -lssl -lcrypto
+# Hand-curated: covers the EVP high-level digest/cipher API plus
+# RAND_bytes, SHA256 direct, and HMAC. All EVP context pointers are
+# stored as `whole number` (opaque handle).
+
+# ── Random ───────────────────────────────────────────────────────────────────
+import from C the action RAND_bytes takes opaque pointer and whole number produces whole number as RAND_bytes  # opaque: buf:unsigned char*
+import from C the action RAND_status takes nothing produces whole number as RAND_status
+
+# ── SHA-256 (low-level, no context) ──────────────────────────────────────────
+import from C the action SHA256 takes opaque pointer and whole number and opaque pointer produces opaque pointer as SHA256  # opaque: data:const unsigned char*, digest:unsigned char*
+
+# ── EVP digest (high-level, streaming) ───────────────────────────────────────
+import from C the action EVP_MD_CTX_new takes nothing produces whole number as EVP_MD_CTX_new  # ret:EVP_MD_CTX*
+import from C the action EVP_MD_CTX_free takes whole number produces nothing as EVP_MD_CTX_free  # opaque: EVP_MD_CTX*
+import from C the action EVP_DigestInit_ex takes whole number and whole number and whole number produces whole number as EVP_DigestInit_ex  # opaque: ctx, type:EVP_MD*, engine:ENGINE*
+import from C the action EVP_DigestUpdate takes whole number and opaque pointer and whole number produces whole number as EVP_DigestUpdate  # opaque: ctx, data
+import from C the action EVP_DigestFinal_ex takes whole number and opaque pointer and whole number produces whole number as EVP_DigestFinal_ex  # opaque: ctx, md, s
+import from C the action EVP_md5 takes nothing produces whole number as EVP_md5  # ret:EVP_MD*
+import from C the action EVP_sha1 takes nothing produces whole number as EVP_sha1  # ret:EVP_MD*
+import from C the action EVP_sha256 takes nothing produces whole number as EVP_sha256  # ret:EVP_MD*
+import from C the action EVP_sha512 takes nothing produces whole number as EVP_sha512  # ret:EVP_MD*
+
+# ── EVP cipher ───────────────────────────────────────────────────────────────
+import from C the action EVP_CIPHER_CTX_new takes nothing produces whole number as EVP_CIPHER_CTX_new  # ret:EVP_CIPHER_CTX*
+import from C the action EVP_CIPHER_CTX_free takes whole number produces nothing as EVP_CIPHER_CTX_free  # opaque: EVP_CIPHER_CTX*
+import from C the action EVP_EncryptInit_ex takes whole number and whole number and whole number and opaque pointer and opaque pointer produces whole number as EVP_EncryptInit_ex  # opaque: ctx, type, engine, key, iv
+import from C the action EVP_EncryptUpdate takes whole number and opaque pointer and whole number and opaque pointer and whole number produces whole number as EVP_EncryptUpdate  # opaque: ctx, out, in
+import from C the action EVP_EncryptFinal_ex takes whole number and opaque pointer and whole number produces whole number as EVP_EncryptFinal_ex  # opaque: ctx, out, outl
+import from C the action EVP_DecryptInit_ex takes whole number and whole number and whole number and opaque pointer and opaque pointer produces whole number as EVP_DecryptInit_ex  # opaque: ctx, type, engine, key, iv
+import from C the action EVP_DecryptUpdate takes whole number and opaque pointer and whole number and opaque pointer and whole number produces whole number as EVP_DecryptUpdate  # opaque: ctx, out, in
+import from C the action EVP_DecryptFinal_ex takes whole number and opaque pointer and whole number produces whole number as EVP_DecryptFinal_ex  # opaque: ctx, out, outl
+import from C the action EVP_aes_128_cbc takes nothing produces whole number as EVP_aes_128_cbc  # ret:EVP_CIPHER*
+import from C the action EVP_aes_256_cbc takes nothing produces whole number as EVP_aes_256_cbc  # ret:EVP_CIPHER*
+import from C the action EVP_aes_256_gcm takes nothing produces whole number as EVP_aes_256_gcm  # ret:EVP_CIPHER*
+
+# ── HMAC ─────────────────────────────────────────────────────────────────────
+import from C the action HMAC takes whole number and opaque pointer and whole number and opaque pointer and whole number and opaque pointer and whole number produces opaque pointer as HMAC  # opaque: evp_md, key, data, md
+
+# ── Error ────────────────────────────────────────────────────────────────────
+import from C the action ERR_get_error takes nothing produces whole number as ERR_get_error
+import from C the action ERR_error_string takes whole number and opaque pointer produces text as ERR_error_string  # opaque: buf
+import from C the action ERR_clear_error takes nothing produces nothing as ERR_clear_error

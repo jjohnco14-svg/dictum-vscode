@@ -1,0 +1,479 @@
+{
+  "name": "dictum-vscode",
+  "displayName": "Dictum",
+  "description": "Natural-language systems code. Compiles to C and C++.",
+  "version": "0.1.46",
+  "publisher": "jjsvg",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "dictum",
+    "c",
+    "cpp",
+    "ai",
+    "code generation",
+    "natural language"
+  ],
+  "activationEvents": [
+    "onLanguage:dictum",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "views": {
+      "dictum-sidebar": [
+        {
+          "type": "webview",
+          "id": "dictum.panel",
+          "name": "Dictum",
+          "when": "true"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dictum.generate",
+        "title": "Generate Plan",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.build",
+        "title": "Build",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.review",
+        "title": "Review",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.approvePlan",
+        "title": "Approve Plan",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.transpile",
+        "title": "Transpile",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.apply",
+        "title": "Apply Fixes",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.openSettings",
+        "title": "Open Dictum Settings",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.transpileCompile",
+        "title": "Dictum: Transpile & Compile",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "dictum.runRepl",
+        "title": "Dictum: Start REPL",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "dictum.checkSystemRequirements",
+        "title": "Dictum: Check System Requirements"
+      },
+      {
+        "command": "dictum.calibrateBuildProvider",
+        "title": "Dictum: Calibrate Build Provider Speed"
+      },
+      {
+        "command": "dictum.fetchModels",
+        "title": "Dictum: Fetch Models"
+      },
+      {
+        "command": "dictum.newProject",
+        "title": "Dictum: New Project",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.buildProject",
+        "title": "Dictum: Build Project",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.openLanguageReference",
+        "title": "Dictum: Open Language Reference",
+        "category": "Dictum"
+      },
+      {
+        "command": "dictum.run",
+        "title": "Dictum: Run",
+        "category": "Dictum"
+      }
+    ],
+    "configuration": {
+      "title": "Dictum",
+      "properties": {
+        "dictum.provider": {
+          "type": "string",
+          "default": "ollama",
+          "enum": [
+            "ollama",
+            "openai-compat",
+            "openai",
+            "anthropic"
+          ],
+          "enumDescriptions": [
+            "Local Ollama instance",
+            "OpenAI-compatible API (e.g. vLLM, TGI)",
+            "OpenAI API",
+            "Anthropic Claude API"
+          ],
+          "description": "LLM provider for Dictum code generation"
+        },
+        "dictum.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL for the LLM API endpoint"
+        },
+        "dictum.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authenticated providers (stored in plain text \u2014 use SecretStorage in production)"
+        },
+        "dictum.buildProvider": {
+          "type": "string",
+          "default": "koboldcpp",
+          "enum": [
+            "koboldcpp",
+            "ollama",
+            "lmstudio",
+            "openai-compat",
+            "openai",
+            "anthropic"
+          ],
+          "enumDescriptions": [
+            "Local KoboldCpp instance \u2014 real GBNF-grammar-constrained generation, runs on CPU",
+            "Local Ollama instance \u2014 NOTE: Ollama does not support arbitrary GBNF passthrough; Build falls back to tool-calling here, same as the cloud providers below",
+            "Local LM Studio instance \u2014 no GBNF support, falls back to tool-calling",
+            "OpenAI-compatible API (e.g. vLLM, TGI) \u2014 falls back to tool-calling",
+            "OpenAI API \u2014 falls back to tool-calling",
+            "Anthropic Claude API \u2014 falls back to tool-calling"
+          ],
+          "description": "Provider used for Build (code generation) specifically \u2014 independent of Plan/Review's provider. Set to 'koboldcpp' for real GBNF-grammar-constrained generation; every other provider (including 'ollama', despite earlier docs claiming otherwise) falls back to tool-calling and Build's output is no longer grammar-constrained."
+        },
+        "dictum.buildBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:5001",
+          "description": "Base URL for Build's LLM API endpoint \u2014 independent of dictum.baseUrl. KoboldCpp defaults to port 5001."
+        },
+        "dictum.buildApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for Build's provider, if it requires authentication (stored in plain text \u2014 use SecretStorage in production)"
+        },
+        "dictum.topModel": {
+          "type": "string",
+          "default": "llama3.1:8b",
+          "description": "Model used for plan generation and review (L5 tasks)"
+        },
+        "dictum.buildModel": {
+          "type": "string",
+          "default": "llama3.1:8b",
+          "description": "Model used for build/code generation (L2-L4 tasks)"
+        },
+        "dictum.actMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Act mode: auto-transpile on save without asking"
+        },
+        "dictum.autoApprove": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve safe actions without prompting"
+        },
+        "dictum.strictPlanMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prevents file edits while in Plan mode"
+        },
+        "dictum.autoCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically compress conversation history to stay within context limits"
+        },
+        "dictum.focusChain": {
+          "type": "boolean",
+          "default": true,
+          "description": "Maintain context focus across interactions"
+        },
+        "dictum.grammarMode": {
+          "type": "string",
+          "default": "gbnf",
+          "enum": [
+            "gbnf",
+            "tools"
+          ],
+          "description": "Grammar constraint mode: GBNF (structured) or Tools (function calling)"
+        },
+        "dictum.graphPersistence": {
+          "type": "string",
+          "default": "session",
+          "enum": [
+            "session",
+            "project"
+          ],
+          "enumDescriptions": [
+            "Code graph lives in memory only \u2014 cleared on window reload or restart.",
+            "Code graph persists across reloads/restarts, scoped to this workspace folder."
+          ],
+          "description": "Whether the code graph (workspace symbol table) is kept in memory only for this session, or persisted per-project across reloads."
+        },
+        "dictum.activeSkill": {
+          "type": "string",
+          "default": "general",
+          "enum": [
+            "general",
+            "gamedev"
+          ],
+          "enumDescriptions": [
+            "No domain specialization \u2014 base Dictum only.",
+            "Adds a curated raylib binding library (2D/3D drawing, input, window/audio lifecycle) and game-specific Plan/Build guidance, auto-included in every build."
+          ],
+          "description": "Domain skill to layer on top of base Dictum. A skill is a bundle of shapes/import_c bindings plus Plan/Build guidance \u2014 it does not change the language itself. See skills/library/<name>/ to add a new one."
+        },
+        "dictum.rpmLimit": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Maximum requests per minute for Plan/Review's provider. 0 = unlimited (no throttling). Useful for cloud providers with a hard rate limit (e.g. NVIDIA NIM)."
+        },
+        "dictum.buildRpmLimit": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Maximum requests per minute for Build's provider, independent of dictum.rpmLimit. 0 = unlimited."
+        },
+        "dictum.mcpServers": {
+          "type": "array",
+          "default": [],
+          "description": "MCP (Model Context Protocol) server definitions for external tool integration",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name for this MCP server"
+              },
+              "url": {
+                "type": "string",
+                "description": "Server URL (for URL-type servers)"
+              },
+              "command": {
+                "type": "string",
+                "description": "Command to run (for stdio-type servers)"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments for stdio-type servers"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "url",
+                  "stdio"
+                ],
+                "description": "Connection type: URL (HTTP/SSE) or stdio (local process)"
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this server is active"
+              }
+            },
+            "required": [
+              "name",
+              "type"
+            ]
+          }
+        },
+        "dictum.customHeaders": {
+          "type": "object",
+          "default": {},
+          "description": "Custom HTTP headers to send with API requests"
+        },
+        "dictum.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for LLM generation (lower = more deterministic)"
+        },
+        "dictum.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "description": "Maximum tokens per generation request"
+        },
+        "dictum.contextWindow": {
+          "type": "number",
+          "default": 8192,
+          "description": "Context window size for the selected model"
+        },
+        "dictum.backend": {
+          "type": "string",
+          "default": "c",
+          "enum": [
+            "c",
+            "cpp"
+          ],
+          "description": "Default transpiler backend"
+        },
+        "dictum.cppStandard": {
+          "type": "number",
+          "default": 17,
+          "enum": [
+            17,
+            20,
+            23
+          ],
+          "description": "C++ standard version"
+        },
+        "dictum.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python interpreter to use for the compiler"
+        },
+        "dictum.enableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable real-time validation diagnostics"
+        },
+        "dictum.ollamaUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama server URL"
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "dictum",
+        "aliases": [
+          "Dictum",
+          "dictum"
+        ],
+        "extensions": [
+          ".dict",
+          ".dictum"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dictum",
+        "scopeName": "source.dictum",
+        "path": "./syntaxes/dictum.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "dictum",
+        "path": "./snippets/dictum.json"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "dictum.transpile",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "editorTextFocus && editorLangId == dictum"
+      },
+      {
+        "command": "dictum.transpileCompile",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "editorTextFocus && editorLangId == dictum"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "dictum.transpile",
+          "group": "navigation",
+          "when": "editorLangId == dictum"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "dictum.transpile",
+          "when": "editorLangId == dictum"
+        },
+        {
+          "command": "dictum.transpileCompile",
+          "when": "editorLangId == dictum"
+        },
+        {
+          "command": "dictum.generate"
+        },
+        {
+          "command": "dictum.build"
+        },
+        {
+          "command": "dictum.review"
+        },
+        {
+          "command": "dictum.apply"
+        },
+        {
+          "command": "dictum.runRepl"
+        },
+        {
+          "command": "dictum.checkSystemRequirements"
+        },
+        {
+          "command": "dictum.openSettings"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dictum-sidebar",
+          "title": "Dictum",
+          "icon": "$(file-code)"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "typescript": "^5.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jjsvg/dictum-vscode"
+  },
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#11141c",
+    "theme": "dark"
+  }
+}

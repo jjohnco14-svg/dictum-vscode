@@ -1,0 +1,143 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Dictum",
+  "scopeName": "source.dictum",
+  "fileTypes": [
+    "dict",
+    "dictum"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#unsafe-blocks"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#control"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.dictum",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "unsafe-blocks": {
+      "patterns": [
+        {
+          "name": "keyword.control.unsafe.dictum",
+          "match": "\\b(unsafe|end unsafe)\\b"
+        },
+        {
+          "name": "entity.name.tag.token.dictum",
+          "match": "\\[([A-Z][A-Z0-9_]+)(?::[^\\]]*)?\\]"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.dictum",
+          "match": "\\b(program|end program|module|end module|shape|end shape|action|end action|method|end method|constructor|end constructor|destructor|end destructor)\\b"
+        },
+        {
+          "name": "keyword.control.flow.dictum",
+          "match": "\\b(if|then|otherwise|end if|while|end while|repeat|end repeat|for|each|end for|attempt|on success|on failure|end attempt)\\b"
+        },
+        {
+          "name": "keyword.other.dictum",
+          "match": "\\b(keep|put|into|call|with|use|produce|holds|takes|produces|and|or|not|the|of|a|an|from)\\b"
+        },
+        {
+          "name": "keyword.operator.dictum",
+          "match": "\\b(sum|difference|product|quotient|remainder|value)\\b"
+        }
+      ]
+    },
+    "control": {
+      "patterns": [
+        {
+          "name": "keyword.control.dictum",
+          "match": "\\b(success|failure|end)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.dictum",
+          "match": "\\b(whole number|decimal number|text|flag|nothing|list of|map of|optional)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.dictum",
+          "match": "\\b(is equal to|is not equal to|is greater than|is less than|is at least|is at most)\\b"
+        },
+        {
+          "name": "keyword.operator.dictum",
+          "match": "[+\\-*/<>=]"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.dictum",
+          "match": "\\b\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.dictum",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.dictum",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "entity.name.function.dictum",
+          "match": "(?<=action\\s|method\\s|constructor\\s|destructor\\s)\\w+"
+        },
+        {
+          "name": "entity.name.type.dictum",
+          "match": "(?<=shape\\s|program\\s|module\\s)\\w+"
+        }
+      ]
+    }
+  }
+}

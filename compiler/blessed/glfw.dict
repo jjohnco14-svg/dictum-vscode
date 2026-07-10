@@ -1,0 +1,63 @@
+# Auto-generated blessed stub for GLFW 3.x
+# Source header : <GLFW/glfw3.h>
+# link          : -lglfw
+# Hand-curated: covers the core windowing + input + timing API.
+# Opaque-pointer params (GLFWwindow*, GLFWmonitor*, etc.) are typed as
+# `whole number` — store the returned handle in a `keep ptr as whole number`
+# variable and pass it back to subsequent GLFW calls.
+#
+# Usage in Dictum:
+#   import from C ... (copy the lines you need)
+#   program MyWindow:
+#       keep window as whole number with value 0
+#       call glfwInit
+#       ...
+#   end program
+
+# ── Lifecycle ────────────────────────────────────────────────────────────────
+import from C the action glfwInit takes nothing produces whole number as glfwInit
+import from C the action glfwTerminate takes nothing produces nothing as glfwTerminate
+import from C the action glfwGetVersion takes whole number and whole number and whole number produces nothing as glfwGetVersion
+import from C the action glfwGetVersionString takes nothing produces text as glfwGetVersionString
+
+# ── Window creation / destruction ────────────────────────────────────────────
+import from C the action glfwCreateWindow takes whole number and whole number and text and whole number and whole number produces whole number as glfwCreateWindow  # opaque: monitor:GLFWmonitor*, share:GLFWwindow*
+import from C the action glfwDestroyWindow takes whole number produces nothing as glfwDestroyWindow  # opaque: window:GLFWwindow*
+import from C the action glfwWindowShouldClose takes whole number produces whole number as glfwWindowShouldClose  # opaque: window:GLFWwindow*
+import from C the action glfwSetWindowShouldClose takes whole number and whole number produces nothing as glfwSetWindowShouldClose  # opaque: window:GLFWwindow*
+import from C the action glfwSetWindowTitle takes whole number and text produces nothing as glfwSetWindowTitle  # opaque: window:GLFWwindow*
+import from C the action glfwGetWindowSize takes whole number and whole number and whole number produces nothing as glfwGetWindowSize  # opaque: window:GLFWwindow*
+import from C the action glfwSetWindowSize takes whole number and whole number and whole number produces nothing as glfwSetWindowSize  # opaque: window:GLFWwindow*
+import from C the action glfwGetFramebufferSize takes whole number and whole number and whole number produces nothing as glfwGetFramebufferSize  # opaque: window:GLFWwindow*
+import from C the action glfwIconifyWindow takes whole number produces nothing as glfwIconifyWindow  # opaque: window:GLFWwindow*
+import from C the action glfwRestoreWindow takes whole number produces nothing as glfwRestoreWindow  # opaque: window:GLFWwindow*
+import from C the action glfwMaximizeWindow takes whole number produces nothing as glfwMaximizeWindow  # opaque: window:GLFWwindow*
+import from C the action glfwShowWindow takes whole number produces nothing as glfwShowWindow  # opaque: window:GLFWwindow*
+import from C the action glfwHideWindow takes whole number produces nothing as glfwHideWindow  # opaque: window:GLFWwindow*
+
+# ── OpenGL context ───────────────────────────────────────────────────────────
+import from C the action glfwMakeContextCurrent takes whole number produces nothing as glfwMakeContextCurrent  # opaque: window:GLFWwindow*
+import from C the action glfwGetCurrentContext takes nothing produces whole number as glfwGetCurrentContext  # ret:GLFWwindow*
+import from C the action glfwSwapBuffers takes whole number produces nothing as glfwSwapBuffers  # opaque: window:GLFWwindow*
+import from C the action glfwSwapInterval takes whole number produces nothing as glfwSwapInterval
+import from C the action glfwExtensionSupported takes text produces whole number as glfwExtensionSupported
+import from C the action glfwGetProcAddress takes text produces whole number as glfwGetProcAddress  # ret:GLFWglproc
+
+# ── Events / input ───────────────────────────────────────────────────────────
+import from C the action glfwPollEvents takes nothing produces nothing as glfwPollEvents
+import from C the action glfwWaitEvents takes nothing produces nothing as glfwWaitEvents
+import from C the action glfwPostEmptyEvent takes nothing produces nothing as glfwPostEmptyEvent
+import from C the action glfwGetKey takes whole number and whole number produces whole number as glfwGetKey  # opaque: window:GLFWwindow*
+import from C the action glfwGetMouseButton takes whole number and whole number produces whole number as glfwGetMouseButton  # opaque: window:GLFWwindow*
+import from C the action glfwGetCursorPos takes whole number and whole number and whole number produces nothing as glfwGetCursorPos  # opaque: window:GLFWwindow*
+import from C the action glfwSetCursorPos takes whole number and decimal number and decimal number produces nothing as glfwSetCursorPos  # opaque: window:GLFWwindow*
+import from C the action glfwSetInputMode takes whole number and whole number and whole number produces nothing as glfwSetInputMode  # opaque: window:GLFWwindow*
+
+# ── Time ─────────────────────────────────────────────────────────────────────
+import from C the action glfwGetTime takes nothing produces decimal number as glfwGetTime
+import from C the action glfwSetTime takes decimal number produces nothing as glfwSetTime
+
+# ── Monitor ──────────────────────────────────────────────────────────────────
+import from C the action glfwGetPrimaryMonitor takes nothing produces whole number as glfwGetPrimaryMonitor  # ret:GLFWmonitor*
+import from C the action glfwGetMonitorName takes whole number produces text as glfwGetMonitorName  # opaque: monitor:GLFWmonitor*
+import from C the action glfwWindowHint takes whole number and whole number produces nothing as glfwWindowHint

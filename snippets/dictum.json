@@ -1,0 +1,126 @@
+{
+  "Program": {
+    "prefix": "program",
+    "body": [
+      "program ${1:Name}:",
+      "\t$0",
+      "end program"
+    ],
+    "description": "Dictum program definition"
+  },
+  "Module": {
+    "prefix": "module",
+    "body": [
+      "module ${1:Name}:",
+      "\t$0",
+      "end module"
+    ],
+    "description": "Dictum module definition"
+  },
+  "Shape": {
+    "prefix": "shape",
+    "body": [
+      "shape ${1:Name} holds:",
+      "\t${2:field} as ${3:whole number}",
+      "end shape"
+    ],
+    "description": "Dictum shape (struct) definition"
+  },
+  "Action": {
+    "prefix": "action",
+    "body": [
+      "action ${1:name} takes ${2:param} as ${3:whole number} produces ${4:whole number}:",
+      "\t$0",
+      "end action"
+    ],
+    "description": "Dictum action (function) definition"
+  },
+  "Action (no params)": {
+    "prefix": "action0",
+    "body": [
+      "action ${1:name} produces ${2:nothing}:",
+      "\t$0",
+      "end action"
+    ],
+    "description": "Dictum action with no parameters"
+  },
+  "Keep variable": {
+    "prefix": "keep",
+    "body": [
+      "keep ${1:name} as ${2:whole number} with value ${3:0}"
+    ],
+    "description": "Declare a variable"
+  },
+  "Put into": {
+    "prefix": "put",
+    "body": [
+      "put ${1:expression} into ${2:variable}"
+    ],
+    "description": "Assign expression to variable"
+  },
+  "If-then-otherwise": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} then:",
+      "\t$2",
+      "otherwise:",
+      "\t$3",
+      "end if"
+    ],
+    "description": "If/else block"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition}:",
+      "\t$0",
+      "end while"
+    ],
+    "description": "While loop"
+  },
+  "For each": {
+    "prefix": "for",
+    "body": [
+      "for each ${1:item} in ${2:collection}:",
+      "\t$0",
+      "end for"
+    ],
+    "description": "For-each loop"
+  },
+  "Attempt": {
+    "prefix": "attempt",
+    "body": [
+      "attempt:",
+      "\t$1",
+      "on success:",
+      "\t$2",
+      "on failure:",
+      "\t$3",
+      "end attempt"
+    ],
+    "description": "Attempt (try/catch) block"
+  },
+  "Produce success": {
+    "prefix": "produce",
+    "body": [
+      "produce success with ${1:value}"
+    ],
+    "description": "Return a value from action"
+  },
+  "Print": {
+    "prefix": "print",
+    "body": [
+      "print the text \"${1:message}\" and newline"
+    ],
+    "description": "Print to stdout"
+  },
+  "Unsafe block": {
+    "prefix": "unsafe",
+    "body": [
+      "unsafe:",
+      "\t$0",
+      "end unsafe"
+    ],
+    "description": "Unsafe block for low-level operations"
+  }
+}

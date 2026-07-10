@@ -1,0 +1,125 @@
+# Blessed binding for raylib 5.x
+# Source header : <raylib.h>
+# link          : -lraylib -lm -lpthread -ldl -lrt -lGL -lX11
+#
+# Corrected against real raylib 5.x prototypes:
+#   - Color / Vector2 / Vector3 / Camera3D are passed BY VALUE in C, never
+#     as pointers. The previous revision of this file bound every
+#     Color-taking function as `opaque pointer` (void*), which is a real
+#     ABI mismatch: void* is an 8-byte pointer, but raylib's Color is a
+#     4-byte-by-value struct {u8 r,g,b,a}. Passed the old way, arguments
+#     would land in the wrong registers/stack slots against the real
+#     compiled raylib and corrupt every draw call at runtime (this would
+#     never surface as a compile error -- only as garbled rendering or a
+#     crash). Fixed by declaring `Color` as a real Dictum shape with
+#     `byte` fields and passing it by value, matching raylib's actual
+#     memory layout.
+#   - Every raylib parameter/return that is C `float` (not `double`) is now
+#     bound as `f32`, not `decimal number` (which maps to C `double`, 8
+#     bytes vs 4). This affects radius, volume, mouse-wheel delta, and
+#     GetFrameTime. GetTime() genuinely returns `double` in real raylib and
+#     is left as `decimal number`.
+#
+# Colors: raylib exposes predefined Color constants (RAYWHITE, RED, ...) as
+# extern global values, but Dictum's `import from C` only supports
+# importing *functions*, not global constant values, so those can't be
+# bound directly. Build a local Color shape and set r/g/b/a yourself
+# instead -- see LANGUAGE_REFERENCE.md worked examples for the field-set
+# pattern. This is a documented limitation, not a bug: the underlying
+# capability (whole-value struct-by-value passing) is real and tested.
+
+# -- Value-type shapes (byte-for-byte layout match with raylib's C structs) --
+shape Color holds:
+    r as byte
+    g as byte
+    b as byte
+    a as byte
+end shape
+
+shape Vector2 holds:
+    x as f32
+    y as f32
+end shape
+
+shape Vector3 holds:
+    x as f32
+    y as f32
+    z as f32
+end shape
+
+# Matches raylib's Camera3D layout exactly: three Vector3 fields, then
+# fovy (float), then projection (int, CAMERA_PERSPECTIVE=0 / CAMERA_ORTHOGRAPHIC=1).
+shape Camera3D holds:
+    position as Vector3
+    target as Vector3
+    up as Vector3
+    fovy as f32
+    projection as whole number
+end shape
+
+# -- Window -------------------------------------------------------------------
+import from C the action InitWindow takes whole number and whole number and text produces nothing as InitWindow
+import from C the action CloseWindow takes nothing produces nothing as CloseWindow
+import from C the action WindowShouldClose takes nothing produces truth value as WindowShouldClose
+import from C the action IsWindowReady takes nothing produces truth value as IsWindowReady
+import from C the action IsWindowFullscreen takes nothing produces truth value as IsWindowFullscreen
+import from C the action IsWindowHidden takes nothing produces truth value as IsWindowHidden
+import from C the action IsWindowMinimized takes nothing produces truth value as IsWindowMinimized
+import from C the action IsWindowMaximized takes nothing produces truth value as IsWindowMaximized
+import from C the action ToggleFullscreen takes nothing produces nothing as ToggleFullscreen
+import from C the action MaximizeWindow takes nothing produces nothing as MaximizeWindow
+import from C the action MinimizeWindow takes nothing produces nothing as MinimizeWindow
+import from C the action SetWindowTitle takes text produces nothing as SetWindowTitle
+import from C the action SetWindowSize takes whole number and whole number produces nothing as SetWindowSize
+import from C the action GetScreenWidth takes nothing produces whole number as GetScreenWidth
+import from C the action GetScreenHeight takes nothing produces whole number as GetScreenHeight
+import from C the action SetTargetFPS takes whole number produces nothing as SetTargetFPS
+import from C the action GetFPS takes nothing produces whole number as GetFPS
+import from C the action GetFrameTime takes nothing produces f32 as GetFrameTime
+import from C the action GetTime takes nothing produces decimal number as GetTime
+
+# -- Drawing (2D) ---------------------------------------------------------------
+import from C the action BeginDrawing takes nothing produces nothing as BeginDrawing
+import from C the action EndDrawing takes nothing produces nothing as EndDrawing
+import from C the action ClearBackground takes Color produces nothing as ClearBackground
+import from C the action DrawText takes text and whole number and whole number and whole number and Color produces nothing as DrawText
+import from C the action DrawFPS takes whole number and whole number produces nothing as DrawFPS
+import from C the action DrawCircle takes whole number and whole number and f32 and Color produces nothing as DrawCircle
+import from C the action DrawRectangle takes whole number and whole number and whole number and whole number and Color produces nothing as DrawRectangle
+import from C the action DrawLine takes whole number and whole number and whole number and whole number and Color produces nothing as DrawLine
+import from C the action DrawPixel takes whole number and whole number and Color produces nothing as DrawPixel
+
+# -- Drawing (3D) ---------------------------------------------------------------
+# BeginMode3D takes the Camera3D BY VALUE (raylib copies it in); EndMode3D
+# takes nothing. Everything drawn between them is projected through that
+# camera. UpdateCamera takes a POINTER (raylib mutates the camera you pass
+# it in-place) -- demonstrates Dictum's `raw pointer to <shape>` import_c
+# param form, distinct from the by-value shapes above.
+import from C the action BeginMode3D takes Camera3D produces nothing as BeginMode3D
+import from C the action EndMode3D takes nothing produces nothing as EndMode3D
+import from C the action UpdateCamera takes raw pointer to Camera3D and whole number produces nothing as UpdateCamera
+import from C the action DrawCube takes Vector3 and f32 and f32 and f32 and Color produces nothing as DrawCube
+import from C the action DrawCubeWires takes Vector3 and f32 and f32 and f32 and Color produces nothing as DrawCubeWires
+import from C the action DrawSphere takes Vector3 and f32 and Color produces nothing as DrawSphere
+import from C the action DrawSphereWires takes Vector3 and f32 and whole number and whole number and Color produces nothing as DrawSphereWires
+import from C the action DrawGrid takes whole number and f32 produces nothing as DrawGrid
+import from C the action DrawLine3D takes Vector3 and Vector3 and Color produces nothing as DrawLine3D
+import from C the action DrawPoint3D takes Vector3 and Color produces nothing as DrawPoint3D
+
+# -- Input ----------------------------------------------------------------------
+import from C the action IsKeyPressed takes whole number produces truth value as IsKeyPressed
+import from C the action IsKeyDown takes whole number produces truth value as IsKeyDown
+import from C the action IsKeyReleased takes whole number produces truth value as IsKeyReleased
+import from C the action GetKeyPressed takes nothing produces whole number as GetKeyPressed
+import from C the action IsMouseButtonPressed takes whole number produces truth value as IsMouseButtonPressed
+import from C the action IsMouseButtonDown takes whole number produces truth value as IsMouseButtonDown
+import from C the action IsMouseButtonReleased takes whole number produces truth value as IsMouseButtonReleased
+import from C the action GetMouseX takes nothing produces whole number as GetMouseX
+import from C the action GetMouseY takes nothing produces whole number as GetMouseY
+import from C the action GetMouseWheelMove takes nothing produces f32 as GetMouseWheelMove
+
+# -- Audio ------------------------------------------------------------------------
+import from C the action InitAudioDevice takes nothing produces nothing as InitAudioDevice
+import from C the action CloseAudioDevice takes nothing produces nothing as CloseAudioDevice
+import from C the action IsAudioDeviceReady takes nothing produces truth value as IsAudioDeviceReady
+import from C the action SetMasterVolume takes f32 produces nothing as SetMasterVolume

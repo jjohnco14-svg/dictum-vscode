@@ -1,0 +1,51 @@
+{
+  "_comment": "Composite-type bridge for L2 plan-adherence checking. Maps a composite type name Plan might use in a [PLAN: TYPE : ...] description to its exact, real expansion in Dictum's actual grammar vocabulary (see compiler/dictumc/grammar.py's TYPE_WORDS for the ground-truth primitive set this must stay consistent with). Each entry is verified by an explicit field-name/type-count match, never a fuzzy similarity guess — if a composite type used in a plan description is not listed here, checkL2Fields() reports it as 'unverifiable' rather than attempting to guess whether the generated fields are equivalent.",
+  "_maintenance": "Whenever compiler/dictumc/grammar.py's TYPE_WORDS set changes, re-check every 'fieldType' value below still names a real primitive. scripts/check_type_bridge.js (or an equivalent check added to generate_gbnf.py --check) should fail loudly if this file drifts out of sync with the real grammar, the same way GBNF staleness is already caught.",
+  "types": {
+    "vec2": {
+      "fieldSuffixes": ["x", "y"],
+      "fieldType": "fractional number",
+      "description": "2D vector — two fractional number fields, named {base}_x, {base}_y"
+    },
+    "vec3": {
+      "fieldSuffixes": ["x", "y", "z"],
+      "fieldType": "fractional number",
+      "description": "3D vector — three fractional number fields, named {base}_x, {base}_y, {base}_z"
+    },
+    "vec4": {
+      "fieldSuffixes": ["x", "y", "z", "w"],
+      "fieldType": "fractional number",
+      "description": "4D vector / quaternion-like — four fractional number fields, named {base}_x, {base}_y, {base}_z, {base}_w"
+    },
+    "point2d": {
+      "fieldSuffixes": ["x", "y"],
+      "fieldType": "fractional number",
+      "description": "alias for vec2 — same expansion, different common name"
+    },
+    "point3d": {
+      "fieldSuffixes": ["x", "y", "z"],
+      "fieldType": "fractional number",
+      "description": "alias for vec3 — same expansion, different common name"
+    },
+    "rgb": {
+      "fieldSuffixes": ["r", "g", "b"],
+      "fieldType": "whole number",
+      "description": "RGB color — three whole number fields, named {base}_r, {base}_g, {base}_b (0-255 range by convention, not enforced)"
+    },
+    "rgba": {
+      "fieldSuffixes": ["r", "g", "b", "a"],
+      "fieldType": "whole number",
+      "description": "RGBA color — four whole number fields, named {base}_r, {base}_g, {base}_b, {base}_a"
+    },
+    "range": {
+      "fieldSuffixes": ["min", "max"],
+      "fieldType": "fractional number",
+      "description": "a min/max bound pair — two fractional number fields, named {base}_min, {base}_max"
+    },
+    "pair": {
+      "fieldSuffixes": ["first", "second"],
+      "fieldType": "whole number",
+      "description": "a generic two-value pair — defaults to whole number; if Plan specifies a different element type, that type is used for both fields instead of this default"
+    }
+  }
+}

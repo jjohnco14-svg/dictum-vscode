@@ -1,0 +1,55 @@
+# Auto-generated blessed stub for SDL2
+# Source header : <SDL2/SDL.h>
+# link          : -lSDL2
+# Hand-curated: covers init, window, renderer, surface, events, and timing.
+# SDL_Window*, SDL_Renderer*, SDL_Surface*, SDL_Texture* are all opaque
+# handles — stored as `whole number` in Dictum.
+
+# ── Init / quit ──────────────────────────────────────────────────────────────
+import from C the action SDL_Init takes whole number produces whole number as SDL_Init
+import from C the action SDL_InitSubSystem takes whole number produces whole number as SDL_InitSubSystem
+import from C the action SDL_Quit takes nothing produces nothing as SDL_Quit
+import from C the action SDL_QuitSubSystem takes whole number produces nothing as SDL_QuitSubSystem
+import from C the action SDL_GetError takes nothing produces text as SDL_GetError
+import from C the action SDL_ClearError takes nothing produces nothing as SDL_ClearError
+
+# ── Window ───────────────────────────────────────────────────────────────────
+import from C the action SDL_CreateWindow takes text and whole number and whole number and whole number and whole number and whole number produces whole number as SDL_CreateWindow  # ret:SDL_Window*
+import from C the action SDL_DestroyWindow takes whole number produces nothing as SDL_DestroyWindow  # opaque: SDL_Window*
+import from C the action SDL_SetWindowTitle takes whole number and text produces nothing as SDL_SetWindowTitle  # opaque: SDL_Window*
+import from C the action SDL_GetWindowTitle takes whole number produces text as SDL_GetWindowTitle  # opaque: SDL_Window*
+import from C the action SDL_SetWindowSize takes whole number and whole number and whole number produces nothing as SDL_SetWindowSize  # opaque: SDL_Window*
+import from C the action SDL_GetWindowSize takes whole number and whole number and whole number produces nothing as SDL_GetWindowSize  # opaque: SDL_Window*
+import from C the action SDL_ShowWindow takes whole number produces nothing as SDL_ShowWindow  # opaque: SDL_Window*
+import from C the action SDL_HideWindow takes whole number produces nothing as SDL_HideWindow  # opaque: SDL_Window*
+import from C the action SDL_RaiseWindow takes whole number produces nothing as SDL_RaiseWindow  # opaque: SDL_Window*
+
+# ── Renderer ─────────────────────────────────────────────────────────────────
+import from C the action SDL_CreateRenderer takes whole number and whole number and whole number produces whole number as SDL_CreateRenderer  # ret:SDL_Renderer*
+import from C the action SDL_DestroyRenderer takes whole number produces nothing as SDL_DestroyRenderer  # opaque: SDL_Renderer*
+import from C the action SDL_RenderPresent takes whole number produces nothing as SDL_RenderPresent  # opaque: SDL_Renderer*
+import from C the action SDL_RenderClear takes whole number produces whole number as SDL_RenderClear  # opaque: SDL_Renderer*
+import from C the action SDL_SetRenderDrawColor takes whole number and whole number and whole number and whole number and whole number produces whole number as SDL_SetRenderDrawColor  # opaque: SDL_Renderer*
+import from C the action SDL_RenderDrawPoint takes whole number and whole number and whole number produces whole number as SDL_RenderDrawPoint  # opaque: SDL_Renderer*
+import from C the action SDL_RenderDrawLine takes whole number and whole number and whole number and whole number and whole number produces whole number as SDL_RenderDrawLine  # opaque: SDL_Renderer*
+import from C the action SDL_RenderFillRect takes whole number and opaque pointer produces whole number as SDL_RenderFillRect  # opaque: SDL_Renderer*, SDL_Rect*
+import from C the action SDL_RenderCopy takes whole number and whole number and opaque pointer and opaque pointer produces whole number as SDL_RenderCopy  # opaque: SDL_Renderer*, SDL_Texture*, SDL_Rect*, SDL_Rect*
+import from C the action SDL_SetRenderTarget takes whole number and whole number produces whole number as SDL_SetRenderTarget  # opaque: SDL_Renderer*, SDL_Texture*
+
+# ── Events ───────────────────────────────────────────────────────────────────
+import from C the action SDL_PollEvent takes opaque pointer produces whole number as SDL_PollEvent  # opaque: SDL_Event*
+import from C the action SDL_WaitEvent takes opaque pointer produces whole number as SDL_WaitEvent  # opaque: SDL_Event*
+import from C the action SDL_PushEvent takes opaque pointer produces whole number as SDL_PushEvent  # opaque: SDL_Event*
+
+# ── Keyboard / mouse ─────────────────────────────────────────────────────────
+import from C the action SDL_GetKeyboardState takes opaque pointer produces opaque pointer as SDL_GetKeyboardState  # ret:const Uint8*
+import from C the action SDL_GetMouseState takes whole number and whole number produces whole number as SDL_GetMouseState
+import from C the action SDL_WarpMouseInWindow takes whole number and whole number and whole number produces nothing as SDL_WarpMouseInWindow  # opaque: SDL_Window*
+import from C the action SDL_ShowCursor takes whole number produces whole number as SDL_ShowCursor
+
+# ── Timing ───────────────────────────────────────────────────────────────────
+import from C the action SDL_GetTicks takes nothing produces whole number as SDL_GetTicks
+import from C the action SDL_GetTicks64 takes nothing produces whole number as SDL_GetTicks64
+import from C the action SDL_Delay takes whole number produces nothing as SDL_Delay
+import from C the action SDL_GetPerformanceCounter takes nothing produces whole number as SDL_GetPerformanceCounter
+import from C the action SDL_GetPerformanceFrequency takes nothing produces whole number as SDL_GetPerformanceFrequency
