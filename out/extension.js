@@ -20,6 +20,7 @@ const patchEngine_1 = require("./patchEngine");
 const projectScan_1 = require("./projectScan");
 const skills_1 = require("./skills");
 const toolSchema_1 = require("./toolSchema");
+const chunkGrammar_1 = require("./chunkGrammar");
 const fs = require("fs");
 const path = require("path");
 let _statusBar;
@@ -675,12 +676,21 @@ async function _runBuild(ext) {
     // actually gets routed to the C++ emitter instead of being silently built as C.
     const backend = _planDirectives.backend;
     const effectiveMode = _grammarMode === 'auto' ? ollama.autoGrammarMode(_provider) : _grammarMode;
+    // `grammar` here is now the STATIC fallback only — dictum_safe.gbnf/
+    // dictum_unsafe.gbnf, unscoped to any particular chunk. It stays
+    // loaded eagerly (same as before) so there is always something to
+    // fall back to; the real per-chunk grammar is generated fresh for
+    // EACH chunk inside the loop below via chunkGrammar.js, which is
+    // narrower than this file for every tier (see chunk_grammar.py's
+    // module docstring for why, and for the documented cases — OPERATION/
+    // MODIFY tiers — where per-chunk narrowing is deliberately NOT
+    // applied to statement kinds, only to identifiers/types).
     let grammar;
     let grammarLoadError;
+    const needsUnsafe = _planDirectives.skill === 'unsafe' || _planDirectives.skill === 'concurrent';
     if (effectiveMode === 'gbnf') {
         // Skill variant now comes from the Plan model's own [SKILL: ...] directive
         // instead of regex-sniffing keywords out of the plan description text.
-        const needsUnsafe = _planDirectives.skill === 'unsafe' || _planDirectives.skill === 'concurrent';
         const gbnfFile = needsUnsafe ? 'dictum_unsafe.gbnf' : 'dictum_safe.gbnf';
         const gbnfPath = path.join(ext, 'grammar', gbnfFile);
         try {
@@ -699,6 +709,7 @@ async function _runBuild(ext) {
     if (grammarLoadError) {
         _panel.postStatus(`GBNF grammar unavailable (${grammarLoadError}) — falling back to unconstrained generation for this attempt`);
     }
+    const staticGrammar = grammar;
     // Load the base build skill, then layer a skill-variant addendum on top if
     // the plan called for unsafe/concurrent code. Falls back gracefully to base
     // skill only if the variant file doesn't exist yet. NOTE: this is the base
@@ -760,8 +771,26 @@ async function _runBuild(ext) {
     }
     try {
         for (const chunk of chunks) {
+            // Per-chunk grammar: only attempted in GBNF mode (tool-mode/
+            // JSON-Schema already gets its own tight schema per chunk from
+            // toolSchema.js's buildChunkResponseFormat, so this would be
+            // redundant work for that path). chunkGrammar.js's contract
+            // guarantees null on ANY failure, never a throw — falling back
+            // to staticGrammar (the same file every chunk used before this
+            // change) keeps this strictly additive: worst case, a chunk
+            // generates exactly like it did before per-chunk grammar existed.
+            let chunkGrammar = staticGrammar;
+            if (effectiveMode === 'gbnf' && staticGrammar) {
+                const generated = await (0, chunkGrammar_1.generateChunkGrammar)(ext, cfg.pythonPath, chunk, needsUnsafe);
+                if (generated) {
+                    chunkGrammar = generated;
+                }
+                else {
+                    _panel.postStatus(`Per-chunk grammar unavailable for chunk ${chunk.index + 1}/${chunk.total} — using the general dictum_${needsUnsafe ? 'unsafe' : 'safe'}.gbnf grammar for this chunk instead.`);
+                }
+            }
             const result = await _runBuildChunk(ext, {
-                url, key, model, grammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar: accumulated,
+                url, key, model, grammar: chunkGrammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar: accumulated,
             });
             accumulated = result.accumulated;
             if (!result.ok) {
