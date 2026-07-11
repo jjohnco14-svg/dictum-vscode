@@ -20,14 +20,19 @@ type-word     ::= "array" | "bool" | "byte" | "bytes" | "const" | "count" | "dec
 # the authority for full structural validation; this GBNF only constrains
 # the keyword surface for LLM sampling.
 #
-# FIX: see dictum_safe.gbnf's matching comment — [VERIFY: CATEGORY_ID] is a
+# FIX: see dictum_safe.gbnf's matching comment -- [VERIFY: CATEGORY_ID] is a
 # Build-pipeline-only convention not derivable from compiler/dictumc/*, so
 # the generator never emitted a rule for it here either, making the token
 # structurally unreachable under grammar-constrained sampling.
+#
+# UPDATE: also mirrors dictum_safe.gbnf's MODIFY addition -- CHUNK_TIER_ORDER
+# in chunking.js has a seventh tier ("MODIFY") this file didn't have a rule
+# for either. Added here too so unsafe-block generation for a MODIFY-tier
+# chunk isn't grammar-blocked.
 top-level-item ::= top-level-kw | statement-kw | type-word | identifier | number | string | ws | verify-token | punctuation | comment
 
 verify-token    ::= "[" ws? "VERIFY" ws? ":" ws? verify-category "_" [0-9]+ ws? "]"
-verify-category ::= "ARCHITECTURE" | "TYPE" | "INVARIANT" | "OPERATION" | "MEMORY" | "SAFETY"
+verify-category ::= "ARCHITECTURE" | "TYPE" | "INVARIANT" | "OPERATION" | "MODIFY" | "MEMORY" | "SAFETY"
 
 # FIX (found via gbnf_check.py acceptance testing against real,
 # already-compiling Dictum source): the auto-generator derived this

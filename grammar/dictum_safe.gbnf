@@ -39,12 +39,22 @@ type-word     ::= "array" | "bool" | "byte" | "bytes" | "const" | "count" | "dec
 # repeated "If you can find the plan item..." text actually was: 100%
 # grammar-legal noise, not the model literally quoting the prompt back
 # and not a symptom of the fine-tune being undersized. verify-category's
-# six names are chunking.js's own CHUNK_TIER_ORDER, the closed set of
+# names are chunking.js's own CHUNK_TIER_ORDER, the closed set of
 # plan-item categories.
+#
+# UPDATE: CHUNK_TIER_ORDER grew a seventh tier ("MODIFY", for in-place
+# patch chunks routed through patchEngine.js) that this auto-generated
+# file never picked up, because -- same root cause as the bug this
+# comment describes -- the generator only derives from grammar.py/
+# emit_c.py, and MODIFY is a Build-pipeline-only chunk-routing concept
+# with no corresponding compiler node. Added by hand here so grammar-
+# constrained (local/KoboldCpp) generation can actually reach a
+# `[VERIFY: MODIFY_n]` token; the tool-mode/JSON-Schema path already
+# allowed it via toolSchema.js's SCHEMA_APPLICABLE_TIERS.
 top-level-item ::= top-level-kw | statement-kw | type-word | identifier | number | string | ws | verify-token | punctuation | comment
 
 verify-token    ::= "[" ws? "VERIFY" ws? ":" ws? verify-category "_" [0-9]+ ws? "]"
-verify-category ::= "ARCHITECTURE" | "TYPE" | "INVARIANT" | "OPERATION" | "MEMORY" | "SAFETY"
+verify-category ::= "ARCHITECTURE" | "TYPE" | "INVARIANT" | "OPERATION" | "MODIFY" | "MEMORY" | "SAFETY"
 
 # FIX (found via gbnf_check.py acceptance testing against real,
 # already-compiling Dictum source): the auto-generator derived this
