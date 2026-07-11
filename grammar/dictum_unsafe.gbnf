@@ -80,27 +80,17 @@ unsafe-param  ::= identifier | integer
 # ---------------------------------------------------------------------
 expr          ::= comparison
 comparison    ::= additive (" " "is" " " cmp-op " " additive)?
-cmp-op        ::= "equal" " " "to"
-                | "not" " " "equal" " " "to"
-                | "greater" " " "than" (" " "or" " " "equal" " " "to")?
-                | "less" " " "than" (" " "or" " " "equal" " " "to")?
+cmp-op        ::= "equal" " " "to" | "not" " " "equal" " " "to" | "greater" " " "than" (" " "or" " " "equal" " " "to")? | "less" " " "than" (" " "or" " " "equal" " " "to")?
 additive      ::= multiplicative ((" " "plus" " " | " " "minus" " ") multiplicative)*
 multiplicative::= unary ((" " "times" " " | " " "modulo" " " | " " "divided" " " "by" " ") unary)*
-unary         ::= "&" identifier
-                | "*" identifier
-                | "-" unary
-                | primary
+unary         ::= "&" identifier | "*" identifier | "-" unary | primary
 primary       ::= number | string | "true" | "false" | "nothing" | identifier
 
 # ---------------------------------------------------------------------
 # types
 # ---------------------------------------------------------------------
 dtype         ::= prim-type | ptr-type | list-type | identifier
-prim-type     ::= "whole" " " "number"
-                | "decimal" " " "number"
-                | "fractional" " " "number"
-                | "truth" " " "value"
-                | "text" | "count" | "byte" | "bool"
+prim-type     ::= "whole" " " "number" | "decimal" " " "number" | "fractional" " " "number" | "truth" " " "value" | "text" | "count" | "byte" | "bool"
 ptr-type      ::= "raw" " " "pointer" " " "to" " " prim-type
 list-type     ::= "list" " " "of" " " prim-type
 

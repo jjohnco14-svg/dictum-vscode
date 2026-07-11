@@ -94,6 +94,12 @@ RESERVED_WORDS = {
     "text", "plus", "minus", "times", "modulo", "divided", "by", "true",
     "false", "nothing", "unsafe", "whole", "number", "decimal", "fractional",
     "truth", "count", "byte", "bool", "raw", "pointer", "list", "of",
+    # Common prose-description connector words (plan items are sometimes
+    # written descriptively -- "program X that prints Y" -- rather than
+    # tersely; these aren't Dictum keywords, but they aren't real
+    # identifiers either, and were observed leaking into the identifier
+    # whitelist during testing on exactly that phrasing).
+    "that", "prints", "contains", "block", "before", "after", "which",
 }
 
 UNSAFE_NAMES = ("RAW_MALLOC", "RAW_FREE", "ATOMIC_FAA")
@@ -127,11 +133,11 @@ DTYPE_PHRASES = [
 ]
 
 STMT_TRIGGERS = {
-    "keep": r"\bkeep\b",
-    "set": r"\bset\b",
-    "print": r"\bprint\b",
-    "call": r"\bcall\b",
-    "release": r"\brelease\b",
+    "keep": r"\bkeeps?\b",
+    "set": r"\bsets?\b",
+    "print": r"\bprints?\b",
+    "call": r"\bcalls?\b",
+    "release": r"\breleases?\b",
 }
 
 # BUGFIX (found via kaggle/cell6_context_aware_gbnf_test.py's Phase 1
@@ -235,13 +241,11 @@ def _cmp_op_rule(found):
     if not found:
         # Full set -- see module docstring: under-detection must never
         # narrow past what a legitimate description could mean.
-        return (
-            'cmp-op        ::= "equal" " " "to"\n'
-            '                | "not" " " "equal" " " "to"\n'
-            '                | "greater" " " "than" (" " "or" " " "equal" " " "to")?\n'
-            '                | "less" " " "than" (" " "or" " " "equal" " " "to")?'
-        )
-    return "cmp-op        ::= " + "\n                | ".join(found)
+        # SINGLE PHYSICAL LINE -- see root-cause note above.
+        return ('cmp-op        ::= "equal" " " "to" | "not" " " "equal" " " "to" | '
+                '"greater" " " "than" (" " "or" " " "equal" " " "to")? | '
+                '"less" " " "than" (" " "or" " " "equal" " " "to")?')
+    return "cmp-op        ::= " + " | ".join(found)
 
 
 def _arith_rule(found):
@@ -267,15 +271,10 @@ def _arith_rule(found):
 
 def _dtype_rule(found):
     if not found:
-        prim = (
-            '"whole" " " "number"\n'
-            '                | "decimal" " " "number"\n'
-            '                | "fractional" " " "number"\n'
-            '                | "truth" " " "value"\n'
-            '                | "text" | "count" | "byte" | "bool"'
-        )
+        prim = ('"whole" " " "number" | "decimal" " " "number" | "fractional" " " "number" | '
+                '"truth" " " "value" | "text" | "count" | "byte" | "bool"')
     else:
-        prim = "\n                | ".join(found)
+        prim = " | ".join(found)
     return (
         f'dtype         ::= prim-type | ptr-type | list-type | identifier\n'
         f'prim-type     ::= {prim}\n'
@@ -290,19 +289,16 @@ def _unsafe_name_rule(found):
     return f'unsafe-name   ::= {lits}'
 
 
-_TERMINALS = (
+_TERMINALS_BASE = (
     'number        ::= [0-9]+ ("." [0-9]+)?\n'
-    'integer       ::= [0-9]+\n'
     'string        ::= "\\"" [^"\\n]* "\\""\n'
     'indent1       ::= "    "\n'
     'indent2       ::= "        "'
 )
+_INTEGER_TERMINAL = 'integer       ::= [0-9]+'
 
 _UNARY = (
-    'unary         ::= "&" identifier\n'
-    '                | "*" identifier\n'
-    '                | "-" unary\n'
-    '                | primary\n'
+    'unary         ::= "&" identifier | "*" identifier | "-" unary | primary\n'
     'primary       ::= number | string | "true" | "false" | "nothing" | identifier'
 )
 
@@ -415,10 +411,17 @@ def generate(chunk):
         parts.append('param         ::= identifier " " "as" " " dtype')
     parts.append("")
 
+    used_stmt_kinds = set()
     if "program" in allowed_top or "action" in allowed_top:
         parts.append(f"body1         ::= (indent1 stmt1 \"\\n\")+")
         parts.append(f"stmt1         ::= {' | '.join(stmt1_alts)}")
         parts.append("")
+        # Same "allow all vs. only detected" decision _stmt_rule makes
+        # internally -- recomputed here (not returned from _stmt_rule)
+        # so the dtype section below can check whether keep-stmt is
+        # actually in play without re-parsing the emitted rule text.
+        _ALL_SIMPLE_KINDS = {"keep", "set", "print", "call", "release"}
+        used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
         parts.append(_stmt_rule(stmt_kinds, body_allow_all))
         parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
@@ -448,16 +451,36 @@ def generate(chunk):
             parts.append('unsafe-param  ::= identifier | integer')
         parts.append("")
 
-    parts.append("expr          ::= comparison")
-    parts.append('comparison    ::= additive (" " "is" " " cmp-op " " additive)?')
-    parts.append(_cmp_op_rule(cmp_found))
-    parts.append(_arith_rule(arith_found))
-    parts.append(_UNARY)
-    parts.append("")
-    parts.append(_dtype_rule(dtype_found))
-    parts.append("")
+    has_ptr_ops = bool(re.search(r"[&*]\s*[A-Za-z_]", text))
+    needs_full_expr_chain = (
+        body_allow_all or include_if or include_while
+        or cmp_found or arith_found or has_ptr_ops
+    )
+    needs_expr = (
+        body_allow_all or include_if or include_while
+        or bool(used_stmt_kinds & {"keep", "set", "print", "call"})
+    )
+    if needs_expr:
+        parts.append("expr          ::= comparison" if needs_full_expr_chain else
+                     'expr          ::= number | string | "true" | "false" | "nothing" | identifier')
+        if needs_full_expr_chain:
+            parts.append('comparison    ::= additive (" " "is" " " cmp-op " " additive)?')
+            parts.append(_cmp_op_rule(cmp_found))
+            parts.append(_arith_rule(arith_found))
+            parts.append(_UNARY)
+        parts.append("")
+    # dtype is only referenced by keep-stmt, field-decl (shape), and
+    # param/produces (action) -- omit the whole dtype/prim-type/ptr-type/
+    # list-type block entirely when none of those are in play (e.g. a
+    # print-only chunk has no use for it at all).
+    needs_dtype = ("shape" in allowed_top) or ("action" in allowed_top) or ("keep" in used_stmt_kinds)
+    if needs_dtype:
+        parts.append(_dtype_rule(dtype_found))
+        parts.append("")
     parts.append(_identifier_rule(idents))
-    parts.append(_TERMINALS)
+    parts.append(_TERMINALS_BASE)
+    if include_repeat or unsafe:
+        parts.append(_INTEGER_TERMINAL)
 
     return "\n".join(parts) + "\n"
 
