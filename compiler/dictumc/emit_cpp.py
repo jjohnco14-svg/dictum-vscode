@@ -847,6 +847,24 @@ class CppEmitter:
                         else:
                             self.emit(f"{ct} {node.name} = std::make_shared<{inner}>();")
                         return
+                    else:
+                        # BUGFIX: `keep p as Person with value new Person` (no
+                        # explicit "unique handle to" prefix) previously fell
+                        # through to the generic path below, emitting
+                        # `Person p = std::make_unique<Person>();` -- a
+                        # type mismatch (unique_ptr assigned to a by-value
+                        # struct). Treat this the same as an explicit
+                        # `unique handle to <Type>` declaration: mark it as
+                        # such in declared_vars so the existing FieldAccess /
+                        # lvalue_to_cpp arrow-detection (below) applies
+                        # automatically, and emit a real unique_ptr.
+                        inner = self.type_to_cpp(raw_type)
+                        self.declared_vars[node.name] = f"unique handle to {raw_type}"
+                        if args:
+                            self.emit(f"auto {node.name} = std::make_unique<{inner}>({args});")
+                        else:
+                            self.emit(f"auto {node.name} = std::make_unique<{inner}>();")
+                        return
                 val = self.expr_to_cpp(node.value)
                 self.emit(f"{ct} {node.name} = {val};")
             return
@@ -1262,8 +1280,22 @@ class CppEmitter:
             if any(h in n for h in ('name','msg','text','str')): return "%s"
             return "%d"
         if isinstance(p, FieldAccess):
-            if p.obj in self.shapes:
-                ft = self.shapes[p.obj].get(p.field, '')
+            # BUGFIX (silent wrong printf format, same root cause the C
+            # backend already fixes): p.obj is the VARIABLE name, but
+            # self.shapes is keyed by the shape/TYPE name -- looking shapes
+            # up by p.obj directly always misses, silently falling back to
+            # "%d" even for text/decimal fields. Resolve the variable's
+            # declared Dictum type first (stripping any smart-pointer
+            # "unique/shared handle to " prefix), then use THAT as the key.
+            declared = self.declared_vars.get(p.obj, '')
+            for prefix in ('unique handle to ', 'shared handle to ',
+                           'weak handle to ', 'raw handle to '):
+                if declared.startswith(prefix):
+                    declared = declared[len(prefix):].strip()
+                    break
+            shape_name = declared or p.obj
+            if shape_name in self.shapes:
+                ft = self.shapes[shape_name].get(p.field, '')
                 if 'fractional' in ft or 'decimal' in ft: return "%f"
                 if ft == 'text': return "%s"
             return "%d"

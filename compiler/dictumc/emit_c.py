@@ -789,7 +789,14 @@ class CEmitter:
         elif isinstance(node, Identifier):
             return node.name
         elif isinstance(node, FieldAccess):
-            return f"{node.obj}.{node.field}"
+            # BUGFIX: a variable holding `new Shape` is a pointer (see the
+            # VarDecl/NewExpr fix above) and pointer field access in C uses
+            # `->`, not `.`. Only the immediate base is checked here (not
+            # nested chains flattened into node.obj, e.g. "a.b") -- those
+            # aren't in declared_vars by construction and keep using `.`,
+            # matching prior (working) behavior for value-typed structs.
+            op = "->" if self.declared_vars.get(node.obj, "").rstrip().endswith("*") else "."
+            return f"{node.obj}{op}{node.field}"
         elif isinstance(node, IndexAccess):
             idx = self.expr_to_c(node.index)
             return f"{node.collection}[{idx}]"
@@ -1064,6 +1071,26 @@ class CEmitter:
                         operand = self.expr_to_c(stmt.value.operand)
                         self.emit(f"{ct} {stmt.name} = NULL;  /* allocated in main() */")
                         self._main_inits.append(f"{stmt.name} = (void*)malloc({operand});")
+                    elif isinstance(stmt.value, NewExpr):
+                        # BUGFIX: `keep p as Person with value new Person` heap-
+                        # allocates via calloc(), which returns a pointer. The
+                        # declared C type must be `Person*`, not `Person` --
+                        # otherwise this is `Person p = calloc(...)`, an
+                        # incompatible-types compile error (previously this fell
+                        # through to the generic "not constant" branch below,
+                        # which kept `ct` as the bare struct type). calloc() is
+                        # also a function call, so -- like room_for -- it's not
+                        # a legal global initializer and must be deferred to
+                        # main() regardless.
+                        # (Guard against double-pointer: a declared type like
+                        # `unique handle to Person` already resolves to
+                        # `Person*` via type_to_c, so only append `*` if `ct`
+                        # isn't already a pointer type.)
+                        ptr_ct = ct if ct.rstrip().endswith('*') else f"{ct}*"
+                        self.declared_vars[stmt.name] = ptr_ct
+                        val = self.expr_to_c(stmt.value)
+                        self.emit(f"{ptr_ct} {stmt.name} = NULL;  /* init deferred to main() */")
+                        self._main_inits.append(f"{stmt.name} = {val};")
                     elif stmt.value is None:
                         if is_array:
                             self.emit(f"{ct} {stmt.name}[1];  /* uninitialized array */")
@@ -1229,6 +1256,17 @@ class CEmitter:
                 ptr_ct = f"{ct}*" if is_array else ct
                 self.declared_vars[node.name] = ptr_ct
                 self.emit(f"{ptr_ct} {node.name} = ({ptr_ct})malloc(sizeof({ct}) * ({operand}));  /* room_for */")
+            elif isinstance(node.value, NewExpr):
+                # BUGFIX (same root cause as the global-VarDecl case above):
+                # `new Shape` allocates via calloc() and returns a pointer,
+                # so the declared C type must be `Shape*`, not `Shape`, or
+                # this is `Shape p = calloc(...)` -- incompatible types.
+                # Guard against double-pointer for an already-pointer
+                # declared type (e.g. `unique handle to Shape` -> `Shape*`).
+                ptr_ct = ct if ct.rstrip().endswith('*') else f"{ct}*"
+                self.declared_vars[node.name] = ptr_ct
+                val = self.expr_to_c(node.value)
+                self.emit(f"{ptr_ct} {node.name} = {val};")
             else:
                 val = self.expr_to_c(node.value)
                 if is_array:
@@ -1251,6 +1289,13 @@ class CEmitter:
                 self.declared_vars[base_name] = inferred_ct
                 self.emit(f"{inferred_ct} {target} = {val};")
             else:
+                # BUGFIX: `set p.field to X` where p holds `new Shape` (a
+                # pointer, per the VarDecl/NewExpr fix) needs `p->field`,
+                # not `p.field` -- C rejects `.` on a pointer. Only the
+                # first segment is rewritten, matching the read-side
+                # FieldAccess fix, since nested chains aren't tracked here.
+                if '.' in target and self.declared_vars.get(base_name, "").rstrip().endswith("*"):
+                    target = target.replace(f"{base_name}.", f"{base_name}->", 1)
                 self.emit(f"{target} = {val};")
             return
 
@@ -1702,6 +1747,11 @@ class CEmitter:
             # value. Resolve the variable's declared C type first, then
             # use THAT as the key into self.shapes.
             shape_name = self.declared_vars.get(p.obj, '')
+            # BUGFIX: a `new Shape` variable is now declared as "Shape*"
+            # (see VarDecl/NewExpr fix), but self.shapes is keyed by the
+            # bare shape name "Shape" -- strip the pointer suffix so the
+            # lookup still hits instead of silently falling back to "%d".
+            shape_name = shape_name.rstrip('*').strip()
             if shape_name in self.shapes:
                 field_type = self.shapes[shape_name].get(p.field, '')
                 if 'fractional' in field_type or 'decimal' in field_type: return "%f"
