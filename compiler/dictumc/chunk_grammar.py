@@ -75,6 +75,26 @@ import json
 import re
 import sys
 
+# FIX (semantic-failure sweep, Cell 8 results): DTYPE_PHRASES used to be an
+# 8-entry hand-copied list, independent of type_registry.py -- the module
+# that exists specifically so a type only has to be added ONCE. Because of
+# that drift, `nothing` (var_valid=False -- "only legal as a return type",
+# literally the registry's own docstring example) was never offered to the
+# GBNF at all. With no legal way to emit `produces nothing`, the model's
+# only path for an untyped/no-return action was the `identifier` fallback,
+# which grabbed whatever name was nearby (a param name, its own action
+# name) -- the direct cause of Tier4/5/6/7's bad return types. Deriving
+# DTYPE_PHRASES from the registry both fixes that gap and means this list
+# can never independently drift from parser/validator/emit_c again.
+try:
+    from . import type_registry as _tr
+except ImportError:  # pragma: no cover -- allows `python3 chunk_grammar.py` standalone
+    import type_registry as _tr
+
+
+def _phrase_to_gbnf(words):
+    return " ".join(f'"{w}"' for w in words)
+
 # ---------------------------------------------------------------------
 # Reserved vocabulary (must NEVER be offered back as a candidate
 # identifier -- copied from dictum_safe.gbnf/dictum_unsafe.gbnf's own
@@ -121,15 +141,17 @@ ARITH_PHRASES = {
     "divided by": '" " "divided" " " "by" " "',
 }
 
+# Value-position primitives (legal for `keep`/field/param -- i.e.
+# var_valid=True) and return-only primitives (var_valid=False, currently
+# just `nothing`), both derived from type_registry.PRIMITIVES instead of
+# hand-copied. Order matches the registry so detect_dtypes' phrase-based
+# matching still prefers longer/more-specific phrases first where it
+# matters (e.g. "decimal number" before "decimal").
 DTYPE_PHRASES = [
-    ("whole number", '"whole" " " "number"'),
-    ("decimal number", '"decimal" " " "number"'),
-    ("fractional number", '"fractional" " " "number"'),
-    ("truth value", '"truth" " " "value"'),
-    ("text", '"text"'),
-    ("count", '"count"'),
-    ("byte", '"byte"'),
-    ("bool", '"bool"'),
+    (p.name, _phrase_to_gbnf(p.words)) for p in _tr.PRIMITIVES if p.var_valid
+]
+RETURN_ONLY_DTYPE_PHRASES = [
+    (p.name, _phrase_to_gbnf(p.words)) for p in _tr.PRIMITIVES if not p.var_valid
 ]
 
 STMT_TRIGGERS = {
@@ -200,12 +222,26 @@ def _count_shape_fields(text):
     return max(1, min(len(fields) if fields else 3, 12))
 
 
-def _estimate_stmt_count(text, stmt_kinds, control_kinds, allow_all):
-    """Upper bound on body1/body2 statement count, used to bound their
+def _estimate_stmt_count(text, stmt_kinds, control_kinds, allow_all, buffer=1):
+    """Upper bound on a SINGLE body's statement count, used to bound its
     repetition instead of an open '+'. Sums trigger-word occurrences for
     every kind actually in play for this chunk, adds a small buffer for
     prose slack, and clamps to a sane range so a pathological
-    description can't blow up grammar size or generation time."""
+    description can't blow up grammar size or generation time.
+
+    BUGFIX (Cell 8 results, Tier3/Tier7): this used to be called with the
+    WHOLE chunk's text for BOTH body1 (action top level) and body2 (the
+    nested while/if/unsafe body), so a trigger word that only belongs
+    inside the nested block (e.g. Tier3's `print`/`set`, which only
+    occur inside the while loop) got counted into body1's budget too --
+    giving body1 spare slots to hallucinate a trailing statement after
+    the loop closes. Callers now pass body-specific text (see
+    _split_nested_text) so each body's budget reflects only the
+    statements actually described for THAT nesting level. The buffer
+    default also dropped from a flat +3 (generous enough that Tier7's
+    single described unsafe block could repeat 3x) to +1, with callers
+    opting into a slightly larger buffer only for the body that
+    genuinely holds the nested "real work" (body2)."""
     total = 0
     for k, pat in STMT_TRIGGERS.items():
         if allow_all or k in stmt_kinds:
@@ -213,7 +249,86 @@ def _estimate_stmt_count(text, stmt_kinds, control_kinds, allow_all):
     for k, pat in CONTROL_TRIGGERS.items():
         if allow_all or k in control_kinds:
             total += len(re.findall(pat, text, re.I))
-    return max(1, min(total + 3, 14))
+    return max(1, min(total + buffer, 14))
+
+
+def _split_nested_text(text):
+    """Best-effort split of a chunk's description into (outer_text,
+    inner_text): inner_text is what's described as happening INSIDE a
+    while/if/unsafe block; outer_text is everything else (what belongs
+    in body1). Falls back to returning the same text for both when no
+    nested block phrasing is recognized -- i.e. never LESS informed than
+    the old single-estimate behavior, only more precise when a block is
+    clearly present."""
+    m = re.search(r"\b(?:while|if)\b.*?\b(?:repeat|then)\s*:\s*(.+)", text, re.I | re.S)
+    if m:
+        return text[:m.start(1)], m.group(1)
+    m = re.search(r"\bunsafe\b.*?\bcontains\b\s*(.+)", text, re.I | re.S)
+    if m:
+        return text[:m.start(1)], m.group(1)
+    return text, text
+
+
+def _estimate_unsafe_token_count(text):
+    """Exact-ish count of unsafe tokens described (`RAW_MALLOC ... then
+    RAW_FREE ...` = 2), used instead of the generic simple-stmt trigger
+    count for unsafe bodies -- STMT_TRIGGERS has no entry for
+    RAW_MALLOC/RAW_FREE/ATOMIC_FAA at all, so the generic estimator
+    always fell through to just the flat buffer regardless of how many
+    tokens the plan actually named."""
+    m = re.search(r"\bunsafe\b.*?\bcontains\b\s*(.+)", text, re.I | re.S)
+    if not m:
+        return 2
+    parts = [p for p in re.split(r"\bthen\b|,", m.group(1), flags=re.I) if p.strip()]
+    return max(1, min(len(parts), 6))
+
+
+def _detect_forced_return_dtype(text):
+    """When the plan text is explicit (or explicitly silent) about an
+    action's return type, lock the grammar to that ONE literal instead
+    of leaving return-dtype's full alternation open for the model to
+    guess from. This is the direct fix for Tier4/5/6/7's wrong return
+    types:
+      - Tier4 ("action greet produces nothing") -> explicit match.
+      - Tier5/6/7 never say "produces" at all -> no signal for the model
+        to work from, so the old grammar's open return-dtype rule was
+        pure guesswork every time. Since Dictum actions with unstated
+        return type overwhelmingly mean "no return value" in these plan
+        chunks, default to "nothing" rather than leave it open -- this
+        eliminates the exact failure class seen in the results (P,
+        Buffer, Counter, and the action's own name all hallucinated
+        into produces position) rather than just narrowing it.
+    A "produces <phrase>" that doesn't match a known registry phrase
+    (a real user-defined shape return type) is left alone -- forcing
+    would be wrong there, not just imprecise."""
+    if re.search(r"\bproduces\s+nothing\b", text, re.I):
+        return '"nothing"'
+    for phrase, lit in DTYPE_PHRASES + RETURN_ONLY_DTYPE_PHRASES:
+        if re.search(r"\bproduces\s+" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b", text, re.I):
+            return lit
+    if not re.search(r"\bproduces\b", text, re.I):
+        return '"nothing"'
+    return None
+
+
+def _print_needs_arith(text):
+    """Whether print-arg specifically needs the full additive expression
+    chain -- scoped to text actually following a 'print' trigger, rather
+    than inheriting the whole chunk's arithmetic capability.
+
+    BUGFIX (Cell 8 results, Tier3): the old code gave EVERY print-arg in
+    the chunk the full additive chain whenever ANY part of the chunk
+    (e.g. an unrelated `set X to X minus 1`) used arithmetic anywhere.
+    That's exactly how Tier3 generated the illegal
+    `print the text "Countdown complete" minus 1` -- the print statement
+    itself never mentioned arithmetic, but a `set` sixty characters
+    later did, and the flag was chunk-global. This looks only at a
+    window of text after each 'print' occurrence."""
+    for m in re.finditer(r"\bprints?\b", text, re.I):
+        window = text[m.end(): m.end() + 120]
+        if detect_arith_ops(window) or re.search(r"[&*]\s*[A-Za-z_]", window):
+            return True
+    return False
 
 
 def _all_desc(items):
@@ -282,6 +397,57 @@ def detect_control_kinds(text):
     return found
 
 
+def _identifier_literal_alt(candidates):
+    return " | ".join(f'"{c}"' for c in candidates)
+
+
+def _extract_own_name(text):
+    """The name being DECLARED by this chunk (after program/shape/action).
+    Used to keep a declaration from reusing its own name in a role where
+    that's never correct -- e.g. Tier6's `takes ... unsafe_demo as raw
+    pointer to count`, which reused the action's own name as a second
+    parameter name."""
+    m = re.search(r"\b(?:program|shape|action)\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I)
+    return m.group(1) if m else None
+
+
+def _extract_param_names(text):
+    """Best-effort extraction of names in `takes X as T and Y as T` /
+    `keep X as T` position -- i.e. names that are PARAMETER or LOCAL
+    VARIABLE identifiers, not type names. Used to exclude them from the
+    dtype-identifier fallback (see _dtype_rule) -- Tier6 generated
+    `produces Buffer` where Buffer was a parameter name from an earlier
+    `takes` clause, which is only possible because the old code offered
+    the exact same unfiltered `identifier` rule for both roles."""
+    names = set()
+    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s+as\s+", text, re.I):
+        names.add(m.group(1))
+    return names
+
+
+def _dtype_identifier_candidates(idents, text):
+    """Role-scoped candidate list for dtype's user-defined-shape-type
+    fallback: every extracted identifier EXCEPT names that are never
+    legal as a type --
+      - every action/program name in the chunk (actions aren't types;
+        self-test on Tier4's 3-item chunk caught this: excluding only
+        the FIRST declared name left 'greet'/'main' -- both action
+        names -- offered as candidate FIELD types for an unrelated
+        shape, since a naive single-name exclusion doesn't cover a
+        chunk with more than one declaration).
+      - any name used in a `<name> as <type>` (parameter/keep) position
+        elsewhere in the chunk -- Tier5's `produces P` and Tier6's
+        `produces Buffer` were both a parameter name leaking into
+        return-type position via this exact path.
+    Shape names ARE kept as candidates (a legitimate user-defined-type
+    use, e.g. `keep Bob as Person` in Tier4)."""
+    action_names = set(re.findall(r"\baction\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    program_names = set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    param_names = _extract_param_names(text)
+    exclude = action_names | program_names | param_names
+    return [c for c in idents if c not in exclude]
+
+
 def _identifier_rule(candidates):
     """Tightest-safe identifier rule: if we found real candidate names,
     whitelist exactly those (Option A from the design doc). If we found
@@ -337,18 +503,48 @@ def _arith_rule(found):
     return "\n".join(lines)
 
 
-def _dtype_rule(found):
+def _dtype_rule(found, dtype_ident_candidates):
+    """Value-position dtype rule (legal for keep/field/param). `found` is
+    the list of var_valid primitive literals actually detected in this
+    chunk's text; falls back to the full var_valid set from the registry
+    when nothing was detected (never narrows past what a legitimate
+    description could mean -- same policy as _cmp_op_rule).
+
+    dtype_ident_candidates is the ROLE-SCOPED identifier whitelist for
+    the user-defined-shape-type fallback branch (`identifier` alone used
+    to be offered here unfiltered -- see _dtype_identifier_candidates for
+    why that let a parameter name or the chunk's own action name get
+    hallucinated back as a return/field type, e.g. Tier6's
+    `produces Buffer` where Buffer was actually a parameter name)."""
     if not found:
-        prim = ('"whole" " " "number" | "decimal" " " "number" | "fractional" " " "number" | '
-                '"truth" " " "value" | "text" | "count" | "byte" | "bool"')
+        prim = " | ".join(lit for _, lit in DTYPE_PHRASES)
     else:
         prim = " | ".join(found)
-    return (
-        f'dtype         ::= prim-type | ptr-type | list-type | identifier\n'
-        f'prim-type     ::= {prim}\n'
-        f'ptr-type      ::= "raw" " " "pointer" " " "to" " " prim-type\n'
-        f'list-type     ::= "list" " " "of" " " prim-type'
-    )
+    dtype_ident = (_identifier_literal_alt(dtype_ident_candidates)
+                   if dtype_ident_candidates else None)
+    dtype_alts = "prim-type | ptr-type | list-type"
+    if dtype_ident:
+        dtype_alts += " | dtype-identifier"
+    lines = [
+        f'dtype         ::= {dtype_alts}',
+        f'prim-type     ::= {prim}',
+        'ptr-type      ::= "raw" " " "pointer" " " "to" " " prim-type',
+        'list-type     ::= "list" " " "of" " " prim-type',
+    ]
+    if dtype_ident:
+        lines.append(f'dtype-identifier ::= {dtype_ident}')
+    return "\n".join(lines)
+
+
+def _return_dtype_rule():
+    """Return-position dtype: everything `dtype` allows, PLUS the
+    return-only primitives (currently just `nothing`) that value
+    positions must never accept (type_registry.py's var_valid=False --
+    `void` isn't a value a variable can hold). Kept as a thin wrapper
+    around `dtype` rather than a duplicated prim list, so the two rules
+    can't drift apart the way DTYPE_PHRASES and type_registry.py did."""
+    return_only = " | ".join(lit for _, lit in RETURN_ONLY_DTYPE_PHRASES)
+    return f'return-dtype  ::= dtype | {return_only}' if return_only else 'return-dtype  ::= dtype'
 
 
 def _unsafe_name_rule(found):
@@ -481,17 +677,34 @@ def generate(chunk):
         parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
         parts.append(f'shape-body    ::= {shape_body_gbnf}')
         parts.append('field-decl    ::= identifier " " "as" " " dtype')
+    forced_return = None
     if "action" in allowed_top:
-        parts.append('action-decl   ::= "action" " " identifier (" " "takes" " " params)? " " "produces" " " dtype ":"? "\\n" body1 "end" " " "action"')
-        n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
-        params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
-        parts.append(f'params        ::= param {params_gbnf}'.rstrip())
-        parts.append('param         ::= identifier " " "as" " " dtype')
+        # BUGFIX (Tier6/7): the "takes" clause used to always be offered
+        # as optional, even when the plan text never mentions parameters
+        # at all -- giving the model room to invent a takes-clause out of
+        # thin air (and, since the same unrestricted `identifier` rule
+        # was used for the new param name, reuse the action's OWN name
+        # as that param, as seen in Tier6's
+        # `takes ... and unsafe_demo as raw pointer to count`). Only
+        # offer the clause at all when the plan text has a "takes" (or an
+        # explicit "as"-typed parameter list) to justify it.
+        has_takes_clause = bool(re.search(r"\btakes\b", text, re.I))
+        forced_return = _detect_forced_return_dtype(text)
+        return_ref = forced_return if forced_return else "return-dtype"
+        if has_takes_clause:
+            parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " params " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+            n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
+            params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
+            parts.append(f'params        ::= param {params_gbnf}'.rstrip())
+            parts.append('param         ::= identifier " " "as" " " dtype')
+        else:
+            parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
     parts.append("")
 
     used_stmt_kinds = set()
+    outer_text, inner_text = _split_nested_text(text)
     if "program" in allowed_top or "action" in allowed_top:
-        n_stmts1 = _estimate_stmt_count(text, stmt_kinds, control_kinds, body_allow_all)
+        n_stmts1 = _estimate_stmt_count(outer_text, stmt_kinds, control_kinds, body_allow_all, buffer=1)
         body1_gbnf = _bounded_repeat('indent1 stmt1 "\\n"', n_stmts1, 1)
         parts.append(f"body1         ::= {body1_gbnf}")
         parts.append(f"stmt1         ::= {' | '.join(stmt1_alts)}")
@@ -507,7 +720,17 @@ def generate(chunk):
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
             body2_stmt = "unsafe-stmt" if unsafe else "simple-stmt"
-            n_stmts2 = _estimate_stmt_count(text, stmt_kinds, control_kinds, body_allow_all)
+            if unsafe:
+                # STMT_TRIGGERS has no entry for RAW_MALLOC/RAW_FREE/
+                # ATOMIC_FAA, so the generic estimator always fell
+                # through to just the flat buffer here regardless of
+                # how many tokens the plan named -- e.g. Tier7 named
+                # exactly ONE token but got a buffer-derived budget of
+                # several, which is why its single described unsafe
+                # block came out repeated 3x.
+                n_stmts2 = _estimate_unsafe_token_count(text)
+            else:
+                n_stmts2 = _estimate_stmt_count(inner_text, stmt_kinds, control_kinds, body_allow_all, buffer=2)
             body2_gbnf = _bounded_repeat(f'indent2 {body2_stmt} "\\n"', n_stmts2, 1)
             parts.append(f'body2         ::= {body2_gbnf}')
             if unsafe:
@@ -543,12 +766,14 @@ def generate(chunk):
         body_allow_all or include_if or include_while
         or bool(used_stmt_kinds & {"keep", "set", "print", "call"})
     )
+    print_needs_arith = ("print" in used_stmt_kinds) and _print_needs_arith(text)
     if needs_expr:
         parts.append("expr          ::= comparison" if needs_full_expr_chain else
                      'expr          ::= number | string | "true" | "false" | "nothing" | identifier')
-        if needs_full_expr_chain:
-            parts.append('comparison    ::= additive (" " "is" " " cmp-op " " additive)?')
-            parts.append(_cmp_op_rule(cmp_found))
+        if needs_full_expr_chain or print_needs_arith:
+            if needs_full_expr_chain:
+                parts.append('comparison    ::= additive (" " "is" " " cmp-op " " additive)?')
+                parts.append(_cmp_op_rule(cmp_found))
             parts.append(_arith_rule(arith_found))
             parts.append(_UNARY)
         if "print" in used_stmt_kinds:
@@ -562,7 +787,7 @@ def generate(chunk):
             # produced `print the text "Countdown complete" is greater
             # than 0`. In the collapsed (no-comparison) case `expr` is
             # already comparison-free, so print-arg is just an alias.
-            parts.append('print-arg     ::= additive' if needs_full_expr_chain else 'print-arg     ::= expr')
+            parts.append('print-arg     ::= additive' if print_needs_arith else 'print-arg     ::= expr')
         parts.append("")
     # dtype is only referenced by keep-stmt, field-decl (shape), and
     # param/produces (action) -- omit the whole dtype/prim-type/ptr-type/
@@ -570,7 +795,14 @@ def generate(chunk):
     # print-only chunk has no use for it at all).
     needs_dtype = ("shape" in allowed_top) or ("action" in allowed_top) or ("keep" in used_stmt_kinds)
     if needs_dtype:
-        parts.append(_dtype_rule(dtype_found))
+        dtype_ident_candidates = _dtype_identifier_candidates(idents, text)
+        parts.append(_dtype_rule(dtype_found, dtype_ident_candidates))
+        # return-dtype is only referenced when action-decl's produces slot
+        # wasn't already forced to an exact literal (see
+        # _detect_forced_return_dtype) -- avoids emitting an unreferenced
+        # rule in the common case where the return type is fully pinned.
+        if "action" in allowed_top and forced_return is None:
+            parts.append(_return_dtype_rule())
         parts.append("")
     parts.append(_identifier_rule(idents))
     parts.append(_TERMINALS_BASE)
