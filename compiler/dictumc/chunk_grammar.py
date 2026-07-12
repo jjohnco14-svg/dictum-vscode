@@ -157,6 +157,64 @@ CONTROL_TRIGGERS = {
 
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+# ---------------------------------------------------------------------
+# HANG FIX (Kaggle cell7, Tier2_VariablesArithmetic): every previous
+# per-chunk body/field rule used raw GBNF `+`, which is UNBOUNDED. The
+# grammar constrains *which* tokens are legal at each position but gives
+# the sampler zero pressure to ever choose the "stop repeating" branch
+# over "emit one more copy" -- at low temperature the model can (and, in
+# a live 30s-timeout run, did) sample the same handful of whitelisted
+# identifiers in a cycle indefinitely, never reaching `end`, eating the
+# whole token/time budget as a hang rather than a wrong-but-terminating
+# output. `_bounded_repeat` replaces every open-ended `X+` with an
+# explicit min..max chain built from nested optional groups -- portable
+# GBNF (`(...)`  `?`), no dependency on llama.cpp supporting `{m,n}`
+# quantifiers. Every call site below must pass a max_n derived from the
+# chunk's own plan text, never left unbounded again.
+# ---------------------------------------------------------------------
+
+def _bounded_repeat(unit, max_n, min_n=1):
+    """GBNF for 'unit repeated min_n..max_n times', with no unbounded +/*.
+    unit is a GBNF symbol sequence (e.g. 'indent1 field-decl "\\n"')."""
+    max_n = max(min_n, max_n, 1)
+    extra = max_n - min_n
+    tail = ""
+    for _ in range(extra):
+        tail = f'({unit} {tail})?' if tail else f'({unit})?'
+    mandatory = " ".join([f'({unit})'] * min_n) if min_n > 0 else ""
+    return f"{mandatory} {tail}".strip() if tail else mandatory
+
+
+def _count_shape_fields(text):
+    """Exact field count from a 'shape X holds A as T, B as T, ...'
+    description, so shape-body can be unrolled to an EXACT count instead
+    of an open '+' -- TYPE-tier items are one-line/fully-parseable (see
+    module docstring), so exact is safe here, unlike the prose-based
+    OPERATION case below. Falls back to a small bounded default only
+    when the 'holds' clause itself can't be found/parsed."""
+    m = re.search(r"\bholds\b\s*:?\s*(.+?)(?:$|\.\s|\.\Z)", text, re.I)
+    if not m:
+        return 3
+    segments = re.split(r",|\band\b", m.group(1), flags=re.I)
+    fields = [s for s in segments if re.search(r"\bas\b", s, re.I)]
+    return max(1, min(len(fields) if fields else 3, 12))
+
+
+def _estimate_stmt_count(text, stmt_kinds, control_kinds, allow_all):
+    """Upper bound on body1/body2 statement count, used to bound their
+    repetition instead of an open '+'. Sums trigger-word occurrences for
+    every kind actually in play for this chunk, adds a small buffer for
+    prose slack, and clamps to a sane range so a pathological
+    description can't blow up grammar size or generation time."""
+    total = 0
+    for k, pat in STMT_TRIGGERS.items():
+        if allow_all or k in stmt_kinds:
+            total += len(re.findall(pat, text, re.I))
+    for k, pat in CONTROL_TRIGGERS.items():
+        if allow_all or k in control_kinds:
+            total += len(re.findall(pat, text, re.I))
+    return max(1, min(total + 3, 14))
+
 
 def _all_desc(items):
     return " ".join((it.get("desc") or "") for it in items)
@@ -402,8 +460,10 @@ def generate(chunk):
     if "program" in allowed_top:
         parts.append('program-decl  ::= "program" " " identifier ":"? "\\n" body1 "end" (" " "program")?')
     if "shape" in allowed_top:
+        n_fields = _count_shape_fields(text)
+        shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
         parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" (" " "shape")?')
-        parts.append('shape-body    ::= (indent1 field-decl "\\n")+')
+        parts.append(f'shape-body    ::= {shape_body_gbnf}')
         parts.append('field-decl    ::= identifier " " "as" " " dtype')
     if "action" in allowed_top:
         parts.append('action-decl   ::= "action" " " identifier (" " "takes" " " params)? " " "produces" " " dtype ":"? "\\n" body1 "end" (" " "action")?')
@@ -413,7 +473,9 @@ def generate(chunk):
 
     used_stmt_kinds = set()
     if "program" in allowed_top or "action" in allowed_top:
-        parts.append(f"body1         ::= (indent1 stmt1 \"\\n\")+")
+        n_stmts1 = _estimate_stmt_count(text, stmt_kinds, control_kinds, body_allow_all)
+        body1_gbnf = _bounded_repeat('indent1 stmt1 "\\n"', n_stmts1, 1)
+        parts.append(f"body1         ::= {body1_gbnf}")
         parts.append(f"stmt1         ::= {' | '.join(stmt1_alts)}")
         parts.append("")
         # Same "allow all vs. only detected" decision _stmt_rule makes
@@ -427,7 +489,9 @@ def generate(chunk):
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
             body2_stmt = "unsafe-stmt" if unsafe else "simple-stmt"
-            parts.append(f'body2         ::= (indent2 {body2_stmt} "\\n")+')
+            n_stmts2 = _estimate_stmt_count(text, stmt_kinds, control_kinds, body_allow_all)
+            body2_gbnf = _bounded_repeat(f'indent2 {body2_stmt} "\\n"', n_stmts2, 1)
+            parts.append(f'body2         ::= {body2_gbnf}')
             if unsafe:
                 parts.append("unsafe-stmt   ::= simple-stmt | unsafe-token")
         # Each control-flow rule body is only emitted when it was actually
