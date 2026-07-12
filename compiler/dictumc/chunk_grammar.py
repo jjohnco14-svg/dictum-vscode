@@ -306,11 +306,19 @@ def _cmp_op_rule(found):
     return "cmp-op        ::= " + " | ".join(found)
 
 
+_CHAIN_CAP = 4  # max chained binary ops / "and"-joined args a single
+                # statement may generate -- same hang class as the +/*
+                # fixes above, just lower-risk (shorter loop), still
+                # unbounded and still worth capping.
+
+
 def _arith_rule(found):
     if not found:
+        add_tail = _bounded_repeat('(" " "plus" " " | " " "minus" " ") multiplicative', _CHAIN_CAP, 0)
+        mul_tail = _bounded_repeat('(" " "times" " " | " " "modulo" " " | " " "divided" " " "by" " ") unary', _CHAIN_CAP, 0)
         return (
-            'additive      ::= multiplicative ((" " "plus" " " | " " "minus" " ") multiplicative)*\n'
-            'multiplicative::= unary ((" " "times" " " | " " "modulo" " " | " " "divided" " " "by" " ") unary)*'
+            f'additive      ::= multiplicative {add_tail}\n'
+            f'multiplicative::= unary {mul_tail}'
         )
     # Split found literals back into additive-tier (+/-) vs
     # multiplicative-tier (*, %, /) so the two precedence rules stay
@@ -319,9 +327,11 @@ def _arith_rule(found):
     mul_ops = [f for f in found if f in (ARITH_PHRASES["times"], ARITH_PHRASES["modulo"], ARITH_PHRASES["divided by"])]
     add_alt = " | ".join(add_ops) if add_ops else '" " "plus" " "'
     mul_alt = " | ".join(mul_ops) if mul_ops else None
-    lines = [f'additive      ::= multiplicative (({add_alt}) multiplicative)*']
+    add_tail = _bounded_repeat(f'({add_alt}) multiplicative', _CHAIN_CAP, 0)
+    lines = [f'additive      ::= multiplicative {add_tail}']
     if mul_alt:
-        lines.append(f'multiplicative::= unary (({mul_alt}) unary)*')
+        mul_tail = _bounded_repeat(f'({mul_alt}) unary', _CHAIN_CAP, 0)
+        lines.append(f'multiplicative::= unary {mul_tail}')
     else:
         lines.append('multiplicative::= unary')
     return "\n".join(lines)
@@ -366,11 +376,13 @@ def _stmt_rule(kinds, allow_all):
     detected -- ONLY used for tiers where per-item granularity is fine
     enough to trust (TYPE, MEMORY, SAFETY). See module docstring for why
     OPERATION/MODIFY always pass allow_all=True instead."""
+    print_and_tail = _bounded_repeat('" " "and" " " print-arg', _CHAIN_CAP, 0)
+    call_and_tail = _bounded_repeat('" " "and" " " expr', _CHAIN_CAP, 0)
     all_kinds = {
         "keep": 'keep-stmt     ::= "keep" " " identifier " " "as" " " dtype (" " "with" " " "value" " " expr)?',
         "set": 'set-stmt      ::= "set" " " identifier " " "to" " " expr',
-        "print": 'print-stmt    ::= "print" " " "the" " " "text" " " print-arg (" " "and" " " print-arg)*',
-        "call": 'call-stmt     ::= "call" " " identifier (" " "with" " " expr (" " "and" " " expr)*)? (" " "giving" " " identifier)?',
+        "print": f'print-stmt    ::= "print" " " "the" " " "text" " " print-arg {print_and_tail}',
+        "call": f'call-stmt     ::= "call" " " identifier (" " "with" " " expr {call_and_tail})? (" " "giving" " " identifier)?',
         "release": 'release-stmt  ::= "release" " " identifier',
     }
     use = set(all_kinds) if (allow_all or not kinds) else kinds
@@ -433,7 +445,11 @@ def generate(chunk):
     parts.append(f"# chunk_grammar.py auto-generated -- tier={tier}, items={[it.get('id') for it in items]}")
     parts.append(f"# Do not hand-edit; regenerate from the plan chunk instead.")
     parts.append("")
-    parts.append("root          ::= top-decl (\"\\n\" top-decl)* \"\\n\"?")
+    if len(items) > 1:
+        extra_decls = _bounded_repeat('"\\n" top-decl', len(items) - 1, len(items) - 1)
+        parts.append(f'root          ::= top-decl {extra_decls} "\\n"?')
+    else:
+        parts.append('root          ::= top-decl "\\n"?')
     top_alt = " | ".join(f"{k}-decl" for k in allowed_top)
     parts.append(f"top-decl      ::= {top_alt}")
     parts.append("")
@@ -458,16 +474,18 @@ def generate(chunk):
         stmt1_alts.append("unsafe-block")
 
     if "program" in allowed_top:
-        parts.append('program-decl  ::= "program" " " identifier ":"? "\\n" body1 "end" (" " "program")?')
+        parts.append('program-decl  ::= "program" " " identifier ":"? "\\n" body1 "end" " " "program"')
     if "shape" in allowed_top:
         n_fields = _count_shape_fields(text)
         shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
-        parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" (" " "shape")?')
+        parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
         parts.append(f'shape-body    ::= {shape_body_gbnf}')
         parts.append('field-decl    ::= identifier " " "as" " " dtype')
     if "action" in allowed_top:
-        parts.append('action-decl   ::= "action" " " identifier (" " "takes" " " params)? " " "produces" " " dtype ":"? "\\n" body1 "end" (" " "action")?')
-        parts.append('params        ::= param (" " "and" " " param)*')
+        parts.append('action-decl   ::= "action" " " identifier (" " "takes" " " params)? " " "produces" " " dtype ":"? "\\n" body1 "end" " " "action"')
+        n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
+        params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
+        parts.append(f'params        ::= param {params_gbnf}'.rstrip())
         parts.append('param         ::= identifier " " "as" " " dtype')
     parts.append("")
 
@@ -502,15 +520,16 @@ def generate(chunk):
         # reachability from root, precisely so a stray unused rule can't
         # hide here unnoticed).
         if include_if:
-            parts.append('if-stmt       ::= "if" " " expr " " "then" "\\n" body2 (indent1 "otherwise" "\\n" body2)? indent1 "end" (" " "if")?')
+            parts.append('if-stmt       ::= "if" " " expr " " "then" "\\n" body2 (indent1 "otherwise" "\\n" body2)? indent1 "end" " " "if"')
         if include_while:
-            parts.append('while-stmt    ::= "while" " " expr " " "repeat" "\\n" body2 indent1 "end" (" " ("while" | "repeat"))?')
+            parts.append('while-stmt    ::= "while" " " expr " " "repeat" "\\n" body2 indent1 "end" " " ("while" | "repeat")')
         if include_repeat:
-            parts.append('repeat-stmt   ::= "repeat" " " integer " " "times" " " "using" " " identifier "\\n" body2 indent1 "end" (" " "repeat")?')
+            parts.append('repeat-stmt   ::= "repeat" " " integer " " "times" " " "using" " " identifier "\\n" body2 indent1 "end" " " "repeat"')
         if unsafe:
-            parts.append('unsafe-block  ::= "unsafe" ":"? "\\n" body2 indent1 "end" (" " "unsafe")?')
+            parts.append('unsafe-block  ::= "unsafe" ":"? "\\n" body2 indent1 "end" " " "unsafe"')
             unsafe_found = detect_unsafe_names(text)
-            parts.append('unsafe-token  ::= "[" unsafe-name (" "? ":" " "? unsafe-param)+ " "? "]"')
+            unsafe_param_gbnf = _bounded_repeat('" "? ":" " "? unsafe-param', 4, 1)
+            parts.append(f'unsafe-token  ::= "[" unsafe-name {unsafe_param_gbnf} " "? "]"')
             parts.append(_unsafe_name_rule(unsafe_found))
             parts.append('unsafe-param  ::= identifier | integer')
         parts.append("")

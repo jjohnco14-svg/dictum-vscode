@@ -306,3 +306,39 @@ def normalize_dictum(raw, plan_items):
         raise NormalizationIncomplete(unrecoverable, raw)
 
     return text
+
+
+# ---------------------------------------------------------------------
+# CLI bridge mode -- this was entirely missing, which is why every
+# Kaggle cell7 run logged "Invalid JSON from normalizer" on every tier:
+# `python3 normalize_dictum.py --bridge` had no `if __name__` block at
+# all, so it printed nothing and exited 0, and the caller's
+# `json.loads("")` failed. Reads {"code": str, "plan_items": [...]}
+# from stdin, writes {"ok": true, "code": ...} on success,
+# {"ok": false, "detail": ...} when NormalizationIncomplete is raised
+# (the caller's existing retry-loop path), or {"ok": null, "error": ...}
+# for anything else -- matching the three-way contract cell7's
+# normalize_dictum() already expects.
+# ---------------------------------------------------------------------
+def _bridge_main():
+    import json
+    import sys as _sys
+    try:
+        payload = json.load(_sys.stdin)
+        code = payload.get("code", "")
+        plan_items = payload.get("plan_items") or []
+        result = normalize_dictum(code, plan_items)
+        json.dump({"ok": True, "code": result}, _sys.stdout)
+    except NormalizationIncomplete as e:
+        json.dump({"ok": False, "detail": e.reason, "code": e.raw}, _sys.stdout)
+    except Exception as e:
+        json.dump({"ok": None, "error": str(e)}, _sys.stdout)
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if "--bridge" in _sys.argv:
+        _bridge_main()
+    else:
+        _sys.stderr.write("usage: normalize_dictum.py --bridge < payload.json\n")
+        _sys.exit(1)
