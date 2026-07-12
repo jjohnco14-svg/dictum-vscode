@@ -587,7 +587,17 @@ def _unsafe_token_rule(found):
     for n in names:
         arity = UNSAFE_ARITY.get(n, 2)
         param_seq = " ".join(['" "? ":" " "? unsafe-param'] * arity)
-        rule_name = f"unsafe-tok-{n.lower()}"
+        # BUGFIX (Kaggle Cell 10 kernel crash): rule NAMES in this GBNF
+        # parser must not contain "_" -- confirmed live by the exact
+        # crash this produced: `unsafe-tok-raw_malloc` parsed only as
+        # far as `unsafe-tok-raw`, then choked on the literal `_malloc`
+        # with "expecting newline or end at _malloc". This is NOT the
+        # same rule as quoted terminal strings, where "RAW_MALLOC" (with
+        # its underscore) is and remains completely fine -- only bare
+        # nonterminal names are affected. n.lower() on "RAW_MALLOC"
+        # produces "raw_malloc", carrying the underscore straight into
+        # rule-name position; replace it with "-" instead.
+        rule_name = f"unsafe-tok-{n.lower().replace('_', '-')}"
         alt_names.append(rule_name)
         lines.append(f'{rule_name:<13} ::= "[" "{n}" {param_seq} " "? "]"')
     lines.insert(0, f"unsafe-token  ::= {' | '.join(alt_names)}")
@@ -606,7 +616,21 @@ _TERMINALS_BASE = (
     # output -- excluding them from the string terminal closes off that
     # specific hallucination path without touching any real string
     # content, since no valid Dictum program needs brackets in a string.
-    'string        ::= "\\"" [^"\\n\\[\\]]* "\\""\n'
+    # FOLLOW-UP (Cell 10 results, Tier4): banning only `[`/`]` didn't
+    # stop the interpolation habit, it just relocated it -- the model's
+    # very next attempt used `<name>`/`<age>` instead of `[Person.name]`.
+    # Same underlying pattern (a bracket-delimited placeholder Dictum
+    # doesn't support), different bracket character. Excluding `<`/`>`
+    # too closes that specific escape route as well. This is a blunt,
+    # blacklist-style fix and is explicitly NOT a claim that it closes
+    # the whole class -- see the module docstring's Tier4 entry under
+    # "known remaining limitations": a model that wants to hallucinate
+    # a placeholder syntax can likely find another delimiter (`{name}`,
+    # `%name%`, ...) that isn't banned yet. Real strings needing a
+    # literal `<`/`>` character are not a realistic Dictum use case, so
+    # this trades a small amount of expressiveness for closing off two
+    # more confirmed, live failure modes.
+    'string        ::= "\\"" [^"\\n\\[\\]<>]* "\\""\n'
     'indent1       ::= "    "\n'
     'indent2       ::= "        "'
 )
@@ -639,6 +663,36 @@ def _stmt_rule(kinds, allow_all):
         if k in use:
             lines.append(all_kinds[k])
     return "\n".join(lines)
+
+
+_RULE_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9-]*$")
+
+
+def _validate_rule_names(gbnf_text):
+    """Defense-in-depth for the Cell 10 kernel-crash class of bug: a
+    generated rule NAME containing '_' (or any other char outside
+    [a-zA-Z0-9-]) parses fine as far as this module and Python are
+    concerned, but this GBNF parser's nonterminal-name grammar doesn't
+    include '_' -- confirmed live by `unsafe-tok-raw_malloc` producing
+    "expecting newline or end at _malloc" and taking the whole host
+    process down with it (a native-level parse failure, not a Python
+    exception -- try/except around LlamaGrammar.from_string does NOT
+    reliably catch this). Quoted terminal strings ("RAW_MALLOC" etc.)
+    are completely unaffected and don't need this -- this only checks
+    bare rule-name definitions (the `name ::=` position). Raising here
+    means any future bug of this shape fails as an ordinary ValueError
+    -- an ordinary non-zero exit, per this module's own documented
+    failure contract -- instead of ever reaching the grammar loader."""
+    bad = []
+    for line in gbnf_text.splitlines():
+        head = line.split("::=", 1)
+        if len(head) != 2:
+            continue
+        name = head[0].strip()
+        if name and not _RULE_NAME_RE.match(name):
+            bad.append(name)
+    if bad:
+        raise ValueError(f"generated rule name(s) invalid for this GBNF parser (must be [a-zA-Z][a-zA-Z0-9-]*, no underscore): {bad}")
 
 
 def generate(chunk):
@@ -915,7 +969,9 @@ def generate(chunk):
     if include_repeat or unsafe:
         parts.append(_INTEGER_TERMINAL)
 
-    return "\n".join(parts) + "\n"
+    result = "\n".join(parts) + "\n"
+    _validate_rule_names(result)
+    return result
 
 
 def _self_test():
