@@ -93,7 +93,22 @@ except ImportError:  # pragma: no cover -- allows `python3 chunk_grammar.py` sta
 
 
 def _phrase_to_gbnf(words):
-    return " ".join(f'"{w}"' for w in words)
+    # BUGFIX (Cell 9 results, Tier2): this used to join word-literals with
+    # a plain Python space -- `" ".join(...)` -- which only affects the
+    # *readability* of the .gbnf source text, not the generated output.
+    # GBNF ignores whitespace between grammar tokens; the only way to make
+    # the sampler actually emit a space CHARACTER is an explicit `" "`
+    # string literal between the word tokens, exactly the convention
+    # CMP_PHRASES/ARITH_PHRASES already use by hand a few lines below
+    # (e.g. '"not" " " "equal" " " "to"'). Because this one function
+    # skipped that convention, every multi-word DTYPE_PHRASES entry (the
+    # one exercised in Cell 9: "whole number") concatenated with no
+    # separator at all -- `"whole" "number"` as GBNF emits "wholenumber",
+    # not "whole number". Verified live: cell9_results.json's Tier2 shows
+    # exactly `A as wholenumber` with the space missing. Single-word
+    # phrases (the common case) are unaffected either way, since there's
+    # nothing to join.
+    return ' " " '.join(f'"{w}"' for w in words)
 
 # ---------------------------------------------------------------------
 # Reserved vocabulary (must NEVER be offered back as a candidate
@@ -547,15 +562,51 @@ def _return_dtype_rule():
     return f'return-dtype  ::= dtype | {return_only}' if return_only else 'return-dtype  ::= dtype'
 
 
-def _unsafe_name_rule(found):
+# BUGFIX (Cell 9 results, Tier7): the old unsafe-token rule was one
+# generic `"[" unsafe-name (":" unsafe-param){1,4} "]"` shape shared by
+# all three unsafe ops, with a param-count RANGE (1..4) instead of an
+# exact count -- so the moment the model emitted the minimum legal one
+# param, the grammar was already satisfied and happily closed with `]`,
+# giving `[ATOMIC_FAA: Counter ]` instead of the required
+# `[ATOMIC_FAA: Counter : 1]`. Unlike the generic simple-stmt count
+# (genuinely prose-dependent, see _estimate_stmt_count), each unsafe
+# op's arity is a FIXED fact about the operation itself, not something
+# that needs estimating from text at all: RAW_MALLOC always takes
+# (size, name-to-bind), RAW_FREE always takes (name), ATOMIC_FAA always
+# takes (name, delta). Splitting unsafe-token into one exact-arity
+# sub-rule per op name (instead of one shared shape with a param-count
+# range) closes the loophole structurally rather than by guessing a
+# tighter range.
+UNSAFE_ARITY = {"RAW_MALLOC": 2, "RAW_FREE": 1, "ATOMIC_FAA": 2}
+
+
+def _unsafe_token_rule(found):
     names = found if found else list(UNSAFE_NAMES)
-    lits = " | ".join(f'"{n}"' for n in names)
-    return f'unsafe-name   ::= {lits}'
+    lines = []
+    alt_names = []
+    for n in names:
+        arity = UNSAFE_ARITY.get(n, 2)
+        param_seq = " ".join(['" "? ":" " "? unsafe-param'] * arity)
+        rule_name = f"unsafe-tok-{n.lower()}"
+        alt_names.append(rule_name)
+        lines.append(f'{rule_name:<13} ::= "[" "{n}" {param_seq} " "? "]"')
+    lines.insert(0, f"unsafe-token  ::= {' | '.join(alt_names)}")
+    return "\n".join(lines)
 
 
 _TERMINALS_BASE = (
     'number        ::= [0-9]+ ("." [0-9]+)?\n'
-    'string        ::= "\\"" [^"\\n]* "\\""\n'
+    # BUGFIX (Cell 9 results, Tier4): the old string terminal --
+    # [^"\n]* -- allowed absolutely any character between the quotes,
+    # which is exactly what let the model reach for a Python-f-string
+    # habit it knows well but Dictum doesn't have: `"...[Person.name]..."`.
+    # Dictum has no string-interpolation syntax at all (confirmed: no
+    # bracket-substitution form anywhere in parser.py/grammar.py), so a
+    # literal `[` or `]` inside a string is never legitimate Dictum
+    # output -- excluding them from the string terminal closes off that
+    # specific hallucination path without touching any real string
+    # content, since no valid Dictum program needs brackets in a string.
+    'string        ::= "\\"" [^"\\n\\[\\]]* "\\""\n'
     'indent1       ::= "    "\n'
     'indent2       ::= "        "'
 )
@@ -656,7 +707,25 @@ def generate(chunk):
     # trigger word was actually found in this chunk's own item text.
     # This is the fix for the bug the vocabulary-containment self-test
     # caught: previously all three were unconditional.
-    stmt1_alts = ["simple-stmt"]
+    # BUGFIX (Cell 9 results, Tier6): _stmt_rule's zero-kinds fallback
+    # ("never narrow past what a legitimate description could mean")
+    # offers ALL FIVE simple-stmt kinds -- including call-stmt -- the
+    # moment no keep/set/print/call/release trigger word is found
+    # anywhere in the chunk's text. That fallback is correct for
+    # ARCHITECTURE/OPERATION prose (a description can genuinely imply an
+    # unstated print/call), but it's actively wrong for a MEMORY/SAFETY
+    # chunk whose ENTIRE described content is an unsafe block
+    # (RAW_MALLOC/RAW_FREE/ATOMIC_FAA, no accompanying simple statement
+    # at all): offering simple-stmt there just hands the model a lower-
+    # perplexity escape hatch ("call unsafe_demo") as a grammar-legal
+    # alternative to the unsafe-token it's actually supposed to emit --
+    # exactly what Tier6's real run produced, twice, inside its own
+    # unsafe: block. Narrow this ONLY for that one unambiguous case:
+    # unsafe=True, zero simple-stmt kinds detected, and this tier already
+    # trusts fine-grained per-item detection rather than staying wide
+    # open (not body_allow_all -- see module docstring).
+    omit_simple_stmt = unsafe and not stmt_kinds and not body_allow_all
+    stmt1_alts = [] if omit_simple_stmt else ["simple-stmt"]
     include_if = body_allow_all or "if" in control_kinds
     include_while = body_allow_all or "while" in control_kinds
     include_repeat = body_allow_all or "repeat" in control_kinds
@@ -704,7 +773,33 @@ def generate(chunk):
     used_stmt_kinds = set()
     outer_text, inner_text = _split_nested_text(text)
     if "program" in allowed_top or "action" in allowed_top:
-        n_stmts1 = _estimate_stmt_count(outer_text, stmt_kinds, control_kinds, body_allow_all, buffer=1)
+        # BUGFIX (Cell 9 results, Tier3): a flat buffer=1 here double-counts
+        # when outer_text's ENTIRE content is a single control-flow
+        # statement (e.g. "...while Count is greater than 0 repeat: ").
+        # _estimate_stmt_count already counts the "while" trigger word as
+        # 1 (correctly -- that's the while-statement itself occupying one
+        # body1 slot), so adding +1 more "for prose slack" on top gives
+        # body1 room for a SECOND statement that was never described --
+        # exactly how Tier3 got a trailing print(...) minus 1 hallucinated
+        # after the loop's `end repeat`. The slack buffer is still needed
+        # for chunks whose outer text names real simple statements (keep/
+        # set/print/call/release) that the trigger-word count might
+        # undercount from prose phrasing -- so only suppress it when
+        # outer_text has NO simple-stmt trigger word at all, i.e. the
+        # control-flow statement genuinely is the whole of body1's content.
+        # NOTE: deliberately NOT gated on body_allow_all -- Tier3 (the
+        # chunk this fix targets) IS an OPERATION-tier chunk, so an
+        # `or body_allow_all` override here would silently defeat the
+        # whole fix for exactly the case it exists to cover. The
+        # outer/inner split above already isolates body1's real content
+        # with high confidence (it only fires on a recognized "while/if
+        # ... repeat/then:" boundary), independent of whether this
+        # tier's simple-stmt KIND detection is trusted -- that's a
+        # separate axis (see body_allow_all's use in _stmt_rule) from
+        # whether outer_text has any simple-stmt word in it at all.
+        outer_has_simple_stmt = any(re.search(pat, outer_text, re.I) for pat in STMT_TRIGGERS.values())
+        body1_buffer = 1 if outer_has_simple_stmt else 0
+        n_stmts1 = _estimate_stmt_count(outer_text, stmt_kinds, control_kinds, body_allow_all, buffer=body1_buffer)
         body1_gbnf = _bounded_repeat('indent1 stmt1 "\\n"', n_stmts1, 1)
         parts.append(f"body1         ::= {body1_gbnf}")
         parts.append(f"stmt1         ::= {' | '.join(stmt1_alts)}")
@@ -714,9 +809,16 @@ def generate(chunk):
         # so the dtype section below can check whether keep-stmt is
         # actually in play without re-parsing the emitted rule text.
         _ALL_SIMPLE_KINDS = {"keep", "set", "print", "call", "release"}
-        used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
-        parts.append(_stmt_rule(stmt_kinds, body_allow_all))
-        parts.append("")
+        if omit_simple_stmt:
+            # simple-stmt is referenced by neither stmt1 (above) nor
+            # unsafe-stmt (below) in this case -- don't emit it at all,
+            # both to avoid an unreferenced rule and so there's no
+            # lingering path back to it.
+            used_stmt_kinds = set()
+        else:
+            used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
+            parts.append(_stmt_rule(stmt_kinds, body_allow_all))
+            parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
             body2_stmt = "unsafe-stmt" if unsafe else "simple-stmt"
@@ -734,7 +836,13 @@ def generate(chunk):
             body2_gbnf = _bounded_repeat(f'indent2 {body2_stmt} "\\n"', n_stmts2, 1)
             parts.append(f'body2         ::= {body2_gbnf}')
             if unsafe:
-                parts.append("unsafe-stmt   ::= simple-stmt | unsafe-token")
+                # See omit_simple_stmt above: an unsafe-only chunk (no
+                # keep/set/print/call/release described) must not be able
+                # to satisfy its unsafe block with a simple-stmt at all --
+                # that's the grammar-legal "call unsafe_demo" loophole
+                # Tier6 hit, and it lived here, not just in stmt1.
+                parts.append("unsafe-stmt   ::= unsafe-token" if omit_simple_stmt
+                              else "unsafe-stmt   ::= simple-stmt | unsafe-token")
         # Each control-flow rule body is only emitted when it was actually
         # included in stmt1_alts above -- an unreferenced rule left in the
         # file wouldn't make output invalid, but it WOULD reopen exactly
@@ -751,9 +859,7 @@ def generate(chunk):
         if unsafe:
             parts.append('unsafe-block  ::= "unsafe" ":"? "\\n" body2 indent1 "end" " " "unsafe"')
             unsafe_found = detect_unsafe_names(text)
-            unsafe_param_gbnf = _bounded_repeat('" "? ":" " "? unsafe-param', 4, 1)
-            parts.append(f'unsafe-token  ::= "[" unsafe-name {unsafe_param_gbnf} " "? "]"')
-            parts.append(_unsafe_name_rule(unsafe_found))
+            parts.append(_unsafe_token_rule(unsafe_found))
             parts.append('unsafe-param  ::= identifier | integer')
         parts.append("")
 
