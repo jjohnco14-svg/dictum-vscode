@@ -21,6 +21,7 @@ const projectScan_1 = require("./projectScan");
 const skills_1 = require("./skills");
 const toolSchema_1 = require("./toolSchema");
 const chunkGrammar_1 = require("./chunkGrammar");
+const normalizeDictum_1 = require("./normalizeDictum");
 const fs = require("fs");
 const path = require("path");
 let _statusBar;
@@ -980,11 +981,43 @@ async function _runBuildChunk(ext, ctx) {
                 _panel.postGraph((0, graph_1.getNodes)(), (0, graph_1.getEdges)());
             }
         }
-        const chunkText = await _generateChunkDictumText(ext, {
+        let chunkText = await _generateChunkDictumText(ext, {
             url, key, model, provider: _provider, cfg,
             system, prompt, grammar, tierName: chunk.tierName,
             accumulatedSoFar, onProgress,
         });
+        // Normalize-or-refuse, BEFORE this chunk's text is merged into the
+        // accumulated source or checked by L2/L3. Two outcomes:
+        //   ok:true  -- fixable-class mistake (repetition, an unplanned/
+        //               duplicate field, a missing closer) was corrected;
+        //               chunkText is replaced with the cleaned version and
+        //               proceeds to the merge/L2 checks below as normal.
+        //   ok:false -- unrecoverable-class mistake (e.g. a parameter name
+        //               collapsed onto its own type, or reused twice in one
+        //               takes-clause) -- there's no substring to select a
+        //               fix from, so this is treated EXACTLY like an L2/L3
+        //               failure: fed into the same chunkRetryState/
+        //               decideRetry path with source 'normalize', so the
+        //               next attempt gets it in chunkCorrectionContext just
+        //               like any other check failure would.
+        // ok:null (bridge itself failed) falls back to the raw chunkText
+        // unnormalized -- this step can only help or no-op, never block a
+        // build on a bug in the normalizer.
+        const normResult = await (0, normalizeDictum_1.normalizeDictum)(ext, cfg.pythonPath, chunkText, chunk.items);
+        if (normResult && normResult.ok === true && typeof normResult.text === 'string') {
+            chunkText = normResult.text;
+        }
+        else if (normResult && normResult.ok === false) {
+            const detail = `Normalization could not safely recover this output: ${normResult.reason}`;
+            const decision = (0, retryLoop_1.decideRetry)(chunkRetryState, (0, graph_1.getNodes)(), (0, graph_1.getEdges)(), { source: 'normalize', detail });
+            chunkRetryState = decision.nextState;
+            if (!decision.shouldStop) {
+                chunkCorrectionContext = detail;
+                _panel.postStatus(`Chunk ${chunk.index + 1}/${chunk.total} — unrecoverable output, retrying (attempt ${chunkRetryState.attempt})…`);
+                continue; // retry SAME chunk; nothing from this attempt was merged
+            }
+            return { ok: false, accumulated: accumulatedSoFar, decision, failure: { source: 'normalize', detail } };
+        }
         // Part 1: MODIFY-tier chunks patch the existing named block instead
         // of appending a second, duplicate definition next to it. Falls
         // back to plain append automatically (patchEngine.applyChunk's own

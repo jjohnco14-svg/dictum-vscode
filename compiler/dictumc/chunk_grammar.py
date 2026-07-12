@@ -311,7 +311,7 @@ def _stmt_rule(kinds, allow_all):
     all_kinds = {
         "keep": 'keep-stmt     ::= "keep" " " identifier " " "as" " " dtype (" " "with" " " "value" " " expr)?',
         "set": 'set-stmt      ::= "set" " " identifier " " "to" " " expr',
-        "print": 'print-stmt    ::= "print" " " "the" " " "text" " " expr (" " "and" " " expr)*',
+        "print": 'print-stmt    ::= "print" " " "the" " " "text" " " print-arg (" " "and" " " print-arg)*',
         "call": 'call-stmt     ::= "call" " " identifier (" " "with" " " expr (" " "and" " " expr)*)? (" " "giving" " " identifier)?',
         "release": 'release-stmt  ::= "release" " " identifier',
     }
@@ -468,6 +468,18 @@ def generate(chunk):
             parts.append(_cmp_op_rule(cmp_found))
             parts.append(_arith_rule(arith_found))
             parts.append(_UNARY)
+        if "print" in used_stmt_kinds:
+            # print's argument skips the comparison layer entirely --
+            # `expr` allows a trailing `is <cmp-op> <additive>` suffix
+            # (legitimate for keep/set/call, which may assign or pass a
+            # truth-value result), but a print argument being a
+            # comparison is never sensible ("Countdown complete" is
+            # greater than 0). This was found live: it's grammatically
+            # legal today, which is exactly how Tier3's real Kaggle run
+            # produced `print the text "Countdown complete" is greater
+            # than 0`. In the collapsed (no-comparison) case `expr` is
+            # already comparison-free, so print-arg is just an alias.
+            parts.append('print-arg     ::= additive' if needs_full_expr_chain else 'print-arg     ::= expr')
         parts.append("")
     # dtype is only referenced by keep-stmt, field-decl (shape), and
     # param/produces (action) -- omit the whole dtype/prim-type/ptr-type/
