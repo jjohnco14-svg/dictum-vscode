@@ -1,0 +1,37 @@
+{
+  "pattern_ref": "pointer-ops",
+  "category": "OPERATION",
+  "description": "An action that declares a variable, declares a raw pointer to it, and prints the dereferenced value. Validated against the real transpiler across 20 variations (different action/variable/pointer names and initial values), all parse/emit/compile/link/run clean.",
+  "params": {
+    "action_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the action's name"
+    },
+    "var": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the pointed-to variable's name"
+    },
+    "init_value": {
+      "type": "number",
+      "required": true,
+      "desc": "the starting value bound to {var}"
+    },
+    "ptr": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the pointer variable's name"
+    }
+  },
+  "template": "action {action_name} produces nothing\n    keep {var} as whole number with value {init_value}\n    keep {ptr} as raw pointer to whole number with value &{var}\n    print the text *{ptr} and newline\nend action",
+  "requires": [
+    "{var} must be declared via `keep` BEFORE {ptr}'s declaration -- {ptr}'s initializer `&{var}` references it.",
+    "{ptr} must be declared via `keep ... as raw pointer to whole number with value &{var}` before it is dereferenced with `*{ptr}`."
+  ],
+  "common_mistakes": [
+    "Do not use `set` in place of these `keep` declarations -- `set` requires the variable to already exist, and this pattern's whole body is the declaration, not a later mutation. A real test run, given exactly this construct's plan description, produced `print the text *P` / `set P to &X` / `set X to 42` / `set P to &X` -- never declaring either variable with `keep`, in a nonsensical order, with a redundant final line.",
+    "Do not reorder the three lines shown -- each depends on the one declared before it."
+  ],
+  "example": "action pointer_demo produces nothing\n    keep X as whole number with value 42\n    keep P as raw pointer to whole number with value &X\n    print the text *P and newline\nend action"
+}

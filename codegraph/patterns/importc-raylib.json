@@ -1,0 +1,41 @@
+{
+  "pattern_ref": "importc-raylib",
+  "category": "ARCHITECTURE",
+  "description": "A full raylib game-loop program: window/FPS setup, a Color shape, a game loop that draws one shape per frame for a fixed number of frames, and a program entry point. Validated against the real transpiler (base form, plus confirmed structurally-varying real examples using different draw calls -- see the coverage note below).",
+  "params": {
+    "program_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the program's name"
+    },
+    "width": {
+      "type": "integer",
+      "required": true,
+      "desc": "window width in pixels"
+    },
+    "height": {
+      "type": "integer",
+      "required": true,
+      "desc": "window height in pixels"
+    },
+    "title": {
+      "type": "text",
+      "required": true,
+      "desc": "window title string"
+    },
+    "frames": {
+      "type": "integer",
+      "required": true,
+      "desc": "how many frames the demo loop runs before closing"
+    }
+  },
+  "template": "import from C the action InitWindow takes whole number and whole number and text produces nothing as InitWindow\nimport from C the action CloseWindow takes nothing produces nothing as CloseWindow\nimport from C the action SetTargetFPS takes whole number produces nothing as SetTargetFPS\nimport from C the action BeginDrawing takes nothing produces nothing as BeginDrawing\nimport from C the action EndDrawing takes nothing produces nothing as EndDrawing\nimport from C the action ClearBackground takes Color produces nothing as ClearBackground\nimport from C the action DrawCircle takes whole number and whole number and f32 and Color produces nothing as DrawCircle\nimport from C the action WindowShouldClose takes nothing produces truth value as WindowShouldClose\n\nshape Color holds\n    r as byte\n    g as byte\n    b as byte\n    a as byte\nend shape\n\naction run_game_loop produces nothing\n    keep Background as Color\n    set Background.r to 245\n    set Background.g to 245\n    set Background.b to 245\n    set Background.a to 255\n\n    keep BallColor as Color\n    set BallColor.r to 255\n    set BallColor.g to 0\n    set BallColor.b to 0\n    set BallColor.a to 255\n\n    call InitWindow with {width} and {height} and \"{title}\"\n    call SetTargetFPS with 60\n\n    keep Frames as whole number with value 0\n    keep ShouldClose as truth value with value false\n\n    while Frames is less than {frames} repeat\n        call BeginDrawing\n        call ClearBackground with Background\n        call DrawCircle with 400 and 225 and 40.0 and BallColor\n        call EndDrawing\n        set Frames to Frames plus 1\n        call WindowShouldClose giving ShouldClose\n    end while\n\n    call CloseWindow\nend action\n\nprogram {program_name}\n    call run_game_loop\nend program",
+  "requires": [
+    "A Color field must be set via four separate `set Shape.field to value` statements (r/g/b/a) -- there is no single-statement color-literal syntax.",
+    "`call InitWindow` must run before any drawing calls, and `call CloseWindow` must be the last statement in the action."
+  ],
+  "common_mistakes": [
+    "COVERAGE NOTE, not a hallucination-fix: this template's window-setup/FPS-loop shape (the {width}/{height}/{title}/{frames}/{program_name} params) is confirmed by real transpiler-validated examples, but those same real examples also swap in different draw calls (DrawPixel, DrawLine, ...) and Color field counts that this template does NOT parameterize -- it fixes one illustrative draw call (DrawCircle) and Color shape. Treat the draw-call body as illustrative, not the only valid option, and don't assume this pattern enumerates every raylib call Dictum supports (see skills/library/gamedev for the fuller raylib binding set)."
+  ],
+  "example": "import from C the action InitWindow takes whole number and whole number and text produces nothing as InitWindow\nimport from C the action CloseWindow takes nothing produces nothing as CloseWindow\nimport from C the action SetTargetFPS takes whole number produces nothing as SetTargetFPS\nimport from C the action BeginDrawing takes nothing produces nothing as BeginDrawing\nimport from C the action EndDrawing takes nothing produces nothing as EndDrawing\nimport from C the action ClearBackground takes Color produces nothing as ClearBackground\nimport from C the action DrawCircle takes whole number and whole number and f32 and Color produces nothing as DrawCircle\nimport from C the action WindowShouldClose takes nothing produces truth value as WindowShouldClose\n\nshape Color holds\n    r as byte\n    g as byte\n    b as byte\n    a as byte\nend shape\n\naction run_game_loop produces nothing\n    keep Background as Color\n    set Background.r to 245\n    set Background.g to 245\n    set Background.b to 245\n    set Background.a to 255\n\n    keep BallColor as Color\n    set BallColor.r to 255\n    set BallColor.g to 0\n    set BallColor.b to 0\n    set BallColor.a to 255\n\n    call InitWindow with 800 and 450 and \"Dictum Raylib Demo\"\n    call SetTargetFPS with 60\n\n    keep Frames as whole number with value 0\n    keep ShouldClose as truth value with value false\n\n    while Frames is less than 5 repeat\n        call BeginDrawing\n        call ClearBackground with Background\n        call DrawCircle with 400 and 225 and 40.0 and BallColor\n        call EndDrawing\n        set Frames to Frames plus 1\n        call WindowShouldClose giving ShouldClose\n    end while\n\n    call CloseWindow\nend action\n\nprogram RaylibDemo\n    call run_game_loop\nend program"
+}

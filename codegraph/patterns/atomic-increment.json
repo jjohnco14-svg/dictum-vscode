@@ -1,0 +1,31 @@
+{
+  "pattern_ref": "atomic-increment",
+  "category": "SAFETY",
+  "description": "An action that atomically adds a delta to a variable via a pointer, capturing the previous value in a result variable, inside an unsafe block. Validated against the real transpiler across 20 variations (different action/target names and deltas), all parse/emit/compile clean.",
+  "params": {
+    "action_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the action's name"
+    },
+    "target": {
+      "type": "identifier",
+      "required": true,
+      "desc": "base name for the target variable -- also used to derive `{target}Ptr` (the pointer to it) and `{target}Result` (the variable that receives the previous value), by simple concatenation, exactly as the validated examples do"
+    },
+    "delta": {
+      "type": "integer",
+      "required": true,
+      "desc": "the amount added atomically"
+    }
+  },
+  "template": "action {action_name} produces nothing\n    keep {target} as whole number with value 0\n    keep {target}Ptr as raw pointer to whole number with value &{target}\n    keep {target}Result as whole number with value 0\n    unsafe\n        [ATOMIC_FAA: {target}Ptr : {delta} : {target}Result]\n    end unsafe\nend action",
+  "requires": [
+    "ATOMIC_FAA operates on a POINTER, not the raw variable directly -- {target}, then a pointer to it ({target}Ptr), then a result variable ({target}Result) to receive the previous value, must all be declared via `keep` before the unsafe block."
+  ],
+  "common_mistakes": [
+    "ATOMIC_FAA takes exactly THREE parameters, in order: the pointer, the delta, and the result variable -- `[ATOMIC_FAA: {target}Ptr : {delta} : {target}Result]`. An earlier version of this codebase's own GBNF grammar hardcoded a 2-parameter arity for ATOMIC_FAA (pointer, delta only, no result variable) based on an inaccurate test-suite assumption -- this was a real bug, fixed once this validated data made the correct 3-parameter shape clear (see chunk_grammar.py's UNSAFE_ARITY).",
+    "Do not call ATOMIC_FAA directly on the bare variable (e.g. `[ATOMIC_FAA: {target} : {delta}]`) -- it needs a pointer, not the variable itself, and always needs the third (result) parameter."
+  ],
+  "example": "action increment produces nothing\n    keep Counter as whole number with value 0\n    keep CounterPtr as raw pointer to whole number with value &Counter\n    keep CounterResult as whole number with value 0\n    unsafe\n        [ATOMIC_FAA: CounterPtr : 1 : CounterResult]\n    end unsafe\nend action"
+}

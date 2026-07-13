@@ -1,0 +1,57 @@
+{
+  "pattern_ref": "importc-math",
+  "category": "ARCHITECTURE",
+  "description": "A full program that imports a single-argument C math function, wraps it in a shape + action that calls it in a loop, and a program that runs it. Validated against the real transpiler across 20 variations (different C functions: floor, cos, sin, ceil, fabs, exp, log, ...), all parse/emit/compile clean.",
+  "params": {
+    "c_func": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the real C function name (e.g. \"sqrt\", \"cos\", \"floor\")"
+    },
+    "alias": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the Dictum-side name bound to the import, conventionally `c_{c_func}` (e.g. \"c_sqrt\") but supplied explicitly rather than derived, since the validated data always gives it separately"
+    },
+    "label": {
+      "type": "text",
+      "required": true,
+      "desc": "a human-friendly name for the function used only in the final result-print line -- may differ from {c_func} (e.g. c_func=\"cos\" but label=\"cosine\", c_func=\"fabs\" but label=\"absolute value\")"
+    },
+    "shape_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "name for the (currently unused-by-logic but declared) result shape"
+    },
+    "action_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the wrapper action's name"
+    },
+    "arg_value": {
+      "type": "number",
+      "required": true,
+      "desc": "the input value passed to the C function"
+    },
+    "loop_bound": {
+      "type": "integer",
+      "required": true,
+      "desc": "how many iterations the demonstration loop runs"
+    },
+    "program_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the program's name"
+    }
+  },
+  "template": "import from C the action {c_func} takes decimal number produces decimal number as {alias}\n\nshape {shape_name} holds\n    Input as decimal number\n    Output as decimal number\nend shape\n\naction {action_name} produces nothing\n    keep X as decimal number with value {arg_value}\n    keep Result as decimal number with value 0.0\n    keep I as whole number with value 0\n    call {alias} with X giving Result\n    while I is less than {loop_bound} repeat\n        print the text \"iteration\" and I and newline\n        set I to I plus 1\n    end while\n    print the text \"{label} result:\" and Result and newline\nend action\n\nprogram {program_name}\n    call {action_name}\nend program",
+  "requires": [
+    "The `import from C` declaration must list the exact real C function name and its Dictum-visible alias before either is used anywhere else in the file.",
+    "{alias}, not {c_func}, is what gets called from Dictum code (`call {alias} with X giving Result`)."
+  ],
+  "common_mistakes": [
+    "Do not call {c_func} directly -- only {alias} is a valid Dictum identifier for this import.",
+    "Keep the {label} used in the result-print line human-readable -- it does not need to match {c_func}/{alias} exactly (e.g. \"cosine\" for cos, \"absolute value\" for fabs)."
+  ],
+  "example": "import from C the action sqrt takes decimal number produces decimal number as c_sqrt\n\nshape MathResult holds\n    Input as decimal number\n    Output as decimal number\nend shape\n\naction run_math produces nothing\n    keep X as decimal number with value 144.0\n    keep Result as decimal number with value 0.0\n    keep I as whole number with value 0\n    call c_sqrt with X giving Result\n    while I is less than 3 repeat\n        print the text \"iteration\" and I and newline\n        set I to I plus 1\n    end while\n    print the text \"sqrt result:\" and Result and newline\nend action\n\nprogram MathDemo\n    call run_math\nend program"
+}

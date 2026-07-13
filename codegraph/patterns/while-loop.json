@@ -1,0 +1,37 @@
+{
+  "pattern_ref": "while-loop",
+  "category": "OPERATION",
+  "description": "An action that declares a counter variable and loops while a threshold condition holds, printing and/or decrementing it each iteration. Validated against the real transpiler across 20 variations (different action/variable names, start values, and thresholds), all parse/emit/compile/link/run clean. Supersedes an earlier hand-written version of this pattern that assumed the closer was `end repeat` -- real validated output always uses `end while`.",
+  "params": {
+    "action_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the action's name"
+    },
+    "var": {
+      "type": "identifier",
+      "required": true,
+      "desc": "loop counter variable name -- reused identically in the `keep`, `while`, `print`, and `set` lines. Never invent a different name partway through (this is the exact defect a real Cell 9-11 run produced: the model renamed the loop variable to match the action's own name instead of reusing the plan's variable)."
+    },
+    "init_value": {
+      "type": "number",
+      "required": true,
+      "desc": "the starting value bound in the `keep` declaration"
+    },
+    "threshold": {
+      "type": "number",
+      "required": true,
+      "desc": "the comparison value in the `while ... is greater than ...` condition"
+    }
+  },
+  "template": "action {action_name} produces nothing\n    keep {var} as whole number with value {init_value}\n    while {var} is greater than {threshold} repeat\n        print the text {var} and newline\n        set {var} to {var} minus 1\n    end while\nend action",
+  "requires": [
+    "{var} must be declared via this pattern's own `keep` line -- it does not assume {var} already exists from an earlier chunk."
+  ],
+  "common_mistakes": [
+    "Do not rename or lowercase {var} anywhere in the body -- `keep`, `while`, `print`, and `set` must all reference the exact same identifier.",
+    "The closing keyword is `end while`, not `end repeat`.",
+    "Do not add any statement after `end while` that wasn't part of the described loop body."
+  ],
+  "example": "action countdown produces nothing\n    keep Count as whole number with value 5\n    while Count is greater than 0 repeat\n        print the text Count and newline\n        set Count to Count minus 1\n    end while\nend action"
+}

@@ -1,0 +1,26 @@
+{
+  "pattern_ref": "shape-declaration",
+  "category": "TYPE",
+  "description": "A shape (record/struct-like type) with one or more typed fields and no behavior. Validated against the real transpiler across 20 variations (different shape names and 2-4 fields each, mixed primitive/pointer/text field types), all parse/emit/compile clean.",
+  "params": {
+    "shape_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the shape's name, immediately after `shape`"
+    },
+    "fields": {
+      "type": "field_list",
+      "required": true,
+      "desc": "list of [field_name, dictum_type] pairs, e.g. [[\"A\", \"whole number\"], [\"B\", \"raw pointer to whole number\"]] -- rendered as one indented `field_name as dictum_type` line per entry"
+    }
+  },
+  "template": "shape {shape_name} holds\n{fields}\nend shape",
+  "requires": [
+    "Every field name must be unique within the shape."
+  ],
+  "common_mistakes": [
+    "Do not invent additional fields the plan didn't ask for.",
+    "Do not reference another shape's fields from outside an action on that shape via bracket/dot interpolation like `[ShapeName.field]` inside a string -- Dictum has no such interpolation syntax (see the shape-actions pattern's notes for the concrete failure this refers to)."
+  ],
+  "example": "shape Calculator holds\n    A as whole number\n    B as whole number\n    Sum as whole number\nend shape"
+}

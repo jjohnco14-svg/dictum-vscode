@@ -52,6 +52,15 @@ function getConfig() {
         temperature: cfg.get('temperature', 0.2),
         maxTokens: cfg.get('maxTokens', 4096),
         contextWindow: cfg.get('contextWindow', 8192),
+        // Whether Build injects a matched codegraph pattern's few-shot
+        // example into a chunk's prompt (see out/patternMatch.js +
+        // out/patternGraph.js). Defaults on: it's strictly additive and
+        // fails silently closed (a match failure or bridge timeout just
+        // means no example gets added, never a build failure) -- see
+        // _runBuild's own call site for the fallback contract. Exposed as
+        // a setting mainly so it's easy to A/B or rule out as a variable
+        // while tuning Build quality on a specific host/model.
+        patternHints: cfg.get('patternHints', true),
     };
 }
 /** Absolute path to dictumc_cli.py inside the installed extension. */

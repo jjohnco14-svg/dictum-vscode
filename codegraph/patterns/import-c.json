@@ -1,0 +1,23 @@
+{
+  "pattern_ref": "import-c",
+  "category": "ARCHITECTURE",
+  "description": "A minimal standalone program that prints one line of text and exits -- structurally identical to the hello-world pattern (same template). Kept as its own pattern_ref because the validated dataset and Cell 8-11 test suite both refer to this specific shape as the 'program declares an entry point with no other declarations' case (e.g. Tier1/Tier8), separate from the general-purpose hello-world label.",
+  "params": {
+    "program_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the program's name, immediately after `program`"
+    },
+    "message": {
+      "type": "text",
+      "required": true,
+      "desc": "the exact text to print -- inserted inside the quotes as-is"
+    }
+  },
+  "template": "program {program_name}\n    print the text \"{message}\" and newline\nend program",
+  "requires": [],
+  "common_mistakes": [
+    "Do not add a second `print` or any statement after the one shown."
+  ],
+  "example": "program SqrtDemo\n    print the text \"Enter a number: \" and newline\nend program"
+}

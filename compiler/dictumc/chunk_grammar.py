@@ -577,7 +577,20 @@ def _return_dtype_rule():
 # sub-rule per op name (instead of one shared shape with a param-count
 # range) closes the loophole structurally rather than by guessing a
 # tighter range.
-UNSAFE_ARITY = {"RAW_MALLOC": 2, "RAW_FREE": 1, "ATOMIC_FAA": 2}
+# BUGFIX (validated_patterns.json ground truth, 2026-07-13): ATOMIC_FAA's
+# real arity is THREE params, not two -- confirmed by 21/21 real
+# transpiler-tested examples, every one shaped
+# `[ATOMIC_FAA: <pointer> : <delta> : <result-variable>]`. The Cell 9-11
+# fix that introduced UNSAFE_ARITY guessed 2 (pointer, delta) from the
+# test suite's own plan text ("ATOMIC_FAA Counter 1"), which was itself
+# wrong -- it never mentioned the result variable at all, and used the
+# bare variable instead of a pointer to it. Both the grammar's arity
+# AND the Cell 9-11 test payload's plan text were wrong in the same
+# direction; this fixes the grammar side (see codegraph/patterns/
+# atomic-increment.json for the corrected canonical example + the
+# preconditions this construct actually needs: target variable, a
+# pointer to it, and a result variable, all declared via `keep` first).
+UNSAFE_ARITY = {"RAW_MALLOC": 2, "RAW_FREE": 1, "ATOMIC_FAA": 3}
 
 
 def _unsafe_token_rule(found):

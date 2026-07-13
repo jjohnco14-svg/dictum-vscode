@@ -209,3 +209,89 @@ change needed in `skills.js` itself.
 
 Version at time of writing: **0.1.39**.
 
+## 10. Codegraph pattern database -- storage/lookup mechanism (v0.1.46)
+
+Built in response to Cell 9/10/11's Kaggle findings: GBNF grammar
+constraints (chunk_grammar.py) restrict a generated chunk's *shape*, but
+several real, live failures showed they can't restrict its *content* --
+a small model that's never seen Dictum in training fills an open slot
+with the nearest Python/C/JS habit instead (`countdown` instead of the
+plan's `Count`, invented `<name>`/`[Person.name]` string interpolation,
+swapped unsafe-token param order, ...). Tightening the grammar further
+only relocates the hallucination to a different escape hatch each time
+(see Cell 11's own "known remaining limitations" notes).
+
+**What this is:** a small file-based pattern store --
+`codegraph/patterns/<pattern_ref>.json`, one file per construct, same
+filesystem-as-database convention as `skills/library/<name>/*.dict` and
+`graphify-out/cache/ast/*.json` (no new storage dependency) -- plus a
+loader/binder/renderer (`compiler/dictumc/pattern_graph.py`) and a
+Node-side bridge (`out/patternGraph.js`, same spawn/stdin/stdout
+contract as `normalizeDictum.js`) that turns a `pattern_ref` (+ optional
+params) into a ready-to-inject few-shot context block: description,
+stated preconditions, known common mistakes, and a concrete correct
+Dictum example -- so the Build prompt can show the model real Dictum for
+the specific construct it's about to generate, not just constrain the
+token shape it emits.
+
+**What this is not, yet:** not wired into `_runBuild`/the Build prompt
+itself (that's the next step once there's a real pattern set to wire
+in); not wired into `chunk_grammar.py`'s GBNF generation (a pattern
+could later carry an exact-shape grammar fragment, but that's a
+separate, larger integration -- see `codegraph/PATTERN_SCHEMA.md`'s
+"Deliberately NOT done yet" section); not a Plan-phase `pattern_ref`
+directive yet (parallel to how `[SKILL: name]`/`[FILE: name]` already
+work) -- that requires updating the Plan prompt/`validator.js`, also
+deferred. This commit is the storage + lookup + binding mechanism and
+its tests only, seeded with one real pattern (`while-loop` -- not
+coincidentally the exact construct behind Tier3's undeclared-variable
+failure) so the plumbing has something real to run against; the rest of
+the pattern set (print-interpolation, pointer-ops, unsafe-RAW_MALLOC/
+RAW_FREE/ATOMIC_FAA, ...) is intentionally a separate follow-up.
+
+**Files added:**
+- `codegraph/PATTERN_SCHEMA.md` -- full field contract + rationale.
+- `codegraph/patterns/*.json` -- 10 patterns (hello-world, import-c,
+  shape-declaration, shape-actions, while-loop, pointer-ops, unsafe-
+  malloc, atomic-increment, importc-math, importc-raylib), all
+  cross-validated against `validated_patterns.json` (200 real
+  transpiler-run examples supplied separately, 100% pass rate) -- see
+  `pattern_graph_test.py`'s Layer 5 and each pattern's own
+  `requires`/`common_mistakes` for what's exactly reproduced vs. a
+  documented coverage limit (structural body variation not captured by
+  recorded params, for `while-loop`/`shape-actions`/`importc-raylib`
+  specifically).
+- `compiler/dictumc/pattern_graph.py` -- load/validate/bind/render +
+  `--bridge`/`--list` CLI (same `{ok: true|false|null}` three-way
+  contract as `normalize_dictum.py --bridge`). Adds a `field_list` param
+  type (structured, not scalar -- a list of `[name, type]` pairs
+  rendered as indented shape-field lines) for `shape-declaration.json`/
+  `shape-actions.json`.
+- `compiler/dictumc/pattern_graph_test.py` -- self-test, five layers
+  (in-process API, the actual CLI subprocess contract, schema-violation
+  fixtures in an isolated scratch dir, every shipped pattern loads
+  cleanly, and a cross-check of every pattern's `example` field against
+  `validated_patterns.json`'s real base entries when that dataset file
+  is present on disk). Run directly:
+  `python3 compiler/dictumc/pattern_graph_test.py`.
+- `out/patternGraph.js` -- Node bridge (`renderPatternContext`,
+  `listPatterns`), not yet called from any Build-path file.
+
+**Bugfix found by this data, applied to `chunk_grammar.py`:**
+`UNSAFE_ARITY["ATOMIC_FAA"]` was hardcoded to 2 (pointer, delta) when
+the unsafe-token grammar work landed -- based on the Cell 9-11 test
+suite's own plan text ("ATOMIC_FAA Counter 1"), which never mentioned a
+result variable and used a bare variable instead of a pointer to it.
+`validated_patterns.json`'s 21/21 real transpiler-run ATOMIC_FAA
+examples all show a **three**-parameter form --
+`[ATOMIC_FAA: <pointer> : <delta> : <result-variable>]` -- so
+`UNSAFE_ARITY["ATOMIC_FAA"]` is now 3. Both the grammar's arity and the
+test suite's plan text were wrong in the same direction; this fixes the
+grammar side. See `codegraph/patterns/atomic-increment.json` for the
+corrected canonical example and the preconditions this construct
+actually needs (target variable, a pointer to it, and a result
+variable, all declared via `keep` first).
+
+Version at time of writing: **0.1.46**.
+
+

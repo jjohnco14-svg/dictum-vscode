@@ -1,0 +1,42 @@
+{
+  "pattern_ref": "shape-actions",
+  "category": "ARCHITECTURE",
+  "description": "A shape with 2+ fields, plus two actions: one that does the shape's core work (here, prints a message), and a second that calls the first. Validated against the real transpiler across 20 variations (different shape/field/action names), all parse/emit/compile clean.",
+  "params": {
+    "shape_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the shape's name"
+    },
+    "fields": {
+      "type": "field_list",
+      "required": true,
+      "desc": "list of [field_name, dictum_type] pairs for the shape"
+    },
+    "primary_action": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the action that does the shape's core work"
+    },
+    "greeting": {
+      "type": "text",
+      "required": false,
+      "default": "Hello",
+      "desc": "the message primary_action prints"
+    },
+    "caller_action": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the second action, which just calls primary_action"
+    }
+  },
+  "template": "shape {shape_name} holds\n{fields}\nend shape\naction {primary_action} produces nothing\n    print the text \"{greeting}\" and newline\nend action\naction {caller_action} produces nothing\n    call {primary_action}\nend action",
+  "requires": [
+    "Reference a shape's fields only from inside an action that operates on a declared variable of that shape (e.g. via its parameters or a `keep`-declared instance) -- never via bracket/dot interpolation inside a string."
+  ],
+  "common_mistakes": [
+    "Do not write a string like `\"Hello, my name is [Person.name]\"` or `\"...is <name>...\"` to interpolate a field's value -- Dictum has no string-interpolation syntax at all. This is not a hypothetical: a real test run produced exactly this (first with `[Person.name]`, then with `<name>` after the first form was blocked) when asked to greet using a Person shape's fields.",
+    "Do not write `set ShapeName to someField` -- assigning directly to a shape/type name instead of a declared variable of that shape is not valid. A real test run produced exactly `set Person to age` when asked to write a `main` action for a Person shape with no other guidance."
+  ],
+  "example": "shape Person holds\n    name as text\n    age as whole number\nend shape\naction greet produces nothing\n    print the text \"Hello\" and newline\nend action\naction main produces nothing\n    call greet\nend action"
+}

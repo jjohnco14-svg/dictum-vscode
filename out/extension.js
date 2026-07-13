@@ -22,6 +22,8 @@ const skills_1 = require("./skills");
 const toolSchema_1 = require("./toolSchema");
 const chunkGrammar_1 = require("./chunkGrammar");
 const normalizeDictum_1 = require("./normalizeDictum");
+const patternMatch_1 = require("./patternMatch");
+const patternGraph_1 = require("./patternGraph");
 const fs = require("fs");
 const path = require("path");
 let _statusBar;
@@ -790,8 +792,30 @@ async function _runBuild(ext) {
                     _panel.postStatus(`Per-chunk grammar unavailable for chunk ${chunk.index + 1}/${chunk.total} — using the general dictum_${needsUnsafe ? 'unsafe' : 'safe'}.gbnf grammar for this chunk instead.`);
                 }
             }
+            // Pattern-hint few-shot context: fetched ONCE per chunk (not
+            // inside _runBuildChunk's own retry loop, since the matched
+            // construct doesn't change between retry attempts of the same
+            // chunk — only the correction feedback does). Grammar restricts
+            // *shape*; this gives the model one real, transpiler-validated
+            // example of the specific construct's *content* — see
+            // codegraph/PATTERN_SCHEMA.md for why shape alone wasn't enough
+            // (countdown-vs-Count, [Person.name] interpolation, wrong
+            // unsafe-token param order, ... all real, all shape-legal).
+            // Same fallback contract as chunkGrammar above: a match miss or
+            // bridge failure (null/ok:false) just means no example gets
+            // added — never a build failure, never a retry burned on it.
+            let patternContext = null;
+            if (cfg.patternHints) {
+                const matchedRef = (0, patternMatch_1.matchPatternRef)(chunk.tierName, chunk.items);
+                if (matchedRef) {
+                    const rendered = await (0, patternGraph_1.renderPatternContext)(ext, cfg.pythonPath, matchedRef);
+                    if (rendered && rendered.ok === true && rendered.rendered) {
+                        patternContext = rendered.rendered;
+                    }
+                }
+            }
             const result = await _runBuildChunk(ext, {
-                url, key, model, grammar: chunkGrammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar: accumulated,
+                url, key, model, grammar: chunkGrammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar: accumulated, patternContext,
             });
             accumulated = result.accumulated;
             if (!result.ok) {
@@ -945,7 +969,7 @@ async function _generateChunkDictumText(ext, o) {
     }
 }
 async function _runBuildChunk(ext, ctx) {
-    const { url, key, model, grammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar } = ctx;
+    const { url, key, model, grammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar, patternContext } = ctx;
     let chunkRetryState = (0, retryLoop_1.freshRetryState)();
     let chunkCorrectionContext = '';
     // eslint-disable-next-line no-constant-condition
@@ -959,6 +983,16 @@ async function _runBuildChunk(ext, ctx) {
         const planText = chunk.items.map((p) => `[PLAN: ${p.category} : ${p.id} : ${p.desc}]`).join('\n');
         let prompt = `Implement this part of the plan in Dictum (chunk ${chunk.index + 1}/${chunk.total} — ${chunk.tierName.toLowerCase()}):\n\n${planText}\n\n` +
             `Write only the code for the item(s) above. Do not redefine any symbol already listed under "Project symbols" above — those already exist.`;
+        if (patternContext) {
+            // Few-shot content, not a persona/system fact — kept in the
+            // per-chunk prompt (like planText) rather than folded into
+            // `system` (which carries the persistent skill+symbol-table
+            // context). Explicitly framed as "reference", not "copy this
+            // verbatim" — the goal is showing correct Dictum CONTENT for
+            // this construct, with THIS chunk's own names/values still
+            // coming from the plan text above, not from the example.
+            prompt += `\n\nReference example for this construct (follow this shape and style, but use the plan's own names/values above — do not copy the example's names/values verbatim):\n${patternContext}`;
+        }
         if (baseCorrectionContext) {
             prompt += `\n\n${baseCorrectionContext}`;
         }

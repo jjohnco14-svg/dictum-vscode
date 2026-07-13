@@ -1,0 +1,32 @@
+{
+  "pattern_ref": "unsafe-malloc",
+  "category": "MEMORY",
+  "description": "An action with an unsafe block that allocates a raw buffer and frees it. Validated against the real transpiler across 20 variations (different action/buffer names and sizes), all parse/emit/compile clean.",
+  "params": {
+    "action_name": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the action's name"
+    },
+    "size": {
+      "type": "integer",
+      "required": true,
+      "desc": "byte count passed to RAW_MALLOC"
+    },
+    "buffer": {
+      "type": "identifier",
+      "required": true,
+      "desc": "the name bound to the allocated buffer"
+    }
+  },
+  "template": "action {action_name} produces nothing\n    unsafe\n        [RAW_MALLOC: {size} : {buffer}]\n        [RAW_FREE: {buffer}]\n    end unsafe\nend action",
+  "requires": [
+    "RAW_MALLOC's parameters are ordered (size, name-to-bind) -- size first, then the identifier being allocated.",
+    "Every RAW_MALLOC in a block should be paired with a RAW_FREE on the same buffer before the block ends."
+  ],
+  "common_mistakes": [
+    "Do not swap the parameter order to `[RAW_MALLOC :{buffer}:{size}]` (name first, size second) -- a real test run produced exactly this reversed order.",
+    "Do not substitute an ordinary `call` statement (e.g. `call {action_name}`) for the unsafe-token syntax -- RAW_MALLOC/RAW_FREE are not action calls. A real test run produced `call unsafe_demo` (twice) instead of the RAW_MALLOC/RAW_FREE tokens shown here, when no other simple statement was described for the chunk."
+  ],
+  "example": "action unsafe_demo produces nothing\n    unsafe\n        [RAW_MALLOC: 100 : Buffer]\n        [RAW_FREE: Buffer]\n    end unsafe\nend action"
+}
