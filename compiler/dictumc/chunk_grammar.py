@@ -111,6 +111,62 @@ def _phrase_to_gbnf(words):
     return ' " " '.join(f'"{w}"' for w in words)
 
 # ---------------------------------------------------------------------
+# PHASE 3 -- synonym-tolerant grammar (NL-appreciation direction: the
+# pipeline's Plan/Review stages already lean on the model's NL fluency,
+# but Build's GBNF locked every keyword to ONE literal spelling --
+# fighting the exact thing a language model is naturally good at
+# (expressing one intent several fluent ways) instead of using it. This
+# section widens five statement-trigger keywords plus the two connector
+# phrases inside keep-stmt/field-decl/param (`as`, `with value`) into
+# small, curated synonym alternations, so the model can say what it
+# means in whatever fluent way it reaches for first.
+#
+# SCOPE, DELIBERATELY BOUNDED: this does NOT touch `to` (set-stmt),
+# `giving` (call-stmt), `holds`/`takes`/`produces`, or any
+# CMP_PHRASES/ARITH_PHRASES literal. Two reasons: (1) several of those
+# share short, common English words ("to", "with") with OTHER grammar
+# positions (CMP_PHRASES' "equal to", ARITH_PHRASES' operators) where a
+# synonym swap needs its own collision analysis before it's safe; (2)
+# widening the grammar and writing normalize_dictum.py's matching
+# canonicalize_synonyms() reverse-mapping are one atomic change -- five
+# keywords + two connectors is what's verified end-to-end (grammar ->
+# real parser) this pass. Widening further is a follow-up, not silently
+# bundled in here.
+#
+# Because Build's decoding is grammar-CONSTRAINED (llama.cpp only ever
+# samples a token the active GBNF rule allows), normalize_dictum.py's
+# canonicalizer isn't guessing which of several things the model might
+# have meant -- it's reversing a closed, known set of literal strings
+# that could only have appeared at the exact rule position this module
+# put them in. That's a stronger guarantee than ordinary post-hoc regex
+# cleanup gets to assume.
+# ---------------------------------------------------------------------
+KEYWORD_SYNONYMS = {
+    "keep":    ["keep", "declare", "make"],
+    "set":     ["set", "update", "change"],
+    "print":   ["print", "display", "show"],
+    "call":    ["call", "invoke", "run"],
+    "release": ["release", "free", "deallocate"],
+}
+
+# Multi-word connector alternates. Each value is a list of phrases;
+# each phrase is itself a list of words, so _phrase_to_gbnf's existing
+# `" " `-joining convention (see BUGFIX above) applies unchanged.
+CONNECTOR_SYNONYMS = {
+    "as":         [["as"], ["of", "type"]],
+    "with_value": [["with", "value"], ["initialized", "to"], ["starting", "at"]],
+}
+
+
+def _kw_alt_gbnf(name):
+    return " | ".join(f'"{w}"' for w in KEYWORD_SYNONYMS[name])
+
+
+def _connector_alt_gbnf(name):
+    return " | ".join(_phrase_to_gbnf(phrase) for phrase in CONNECTOR_SYNONYMS[name])
+
+
+# ---------------------------------------------------------------------
 # Reserved vocabulary (must NEVER be offered back as a candidate
 # identifier -- copied from dictum_safe.gbnf/dictum_unsafe.gbnf's own
 # keyword literals, kept as a flat set rather than importing grammar.py's
@@ -135,6 +191,12 @@ RESERVED_WORDS = {
     # identifiers either, and were observed leaking into the identifier
     # whitelist during testing on exactly that phrasing).
     "that", "prints", "contains", "block", "before", "after", "which",
+    # PHASE 3: every synonym KEYWORD_SYNONYMS/CONNECTOR_SYNONYMS now
+    # legally puts in a chunk's own generated text must be reserved here
+    # too, for the same reason the canonical words above are -- none of
+    # these may ever be offered back as a candidate identifier.
+    "declare", "update", "change", "display", "show", "invoke", "run",
+    "free", "deallocate", "of", "type", "initialized", "starting",
 }
 
 UNSAFE_NAMES = ("RAW_MALLOC", "RAW_FREE", "ATOMIC_FAA")
@@ -169,12 +231,23 @@ RETURN_ONLY_DTYPE_PHRASES = [
     (p.name, _phrase_to_gbnf(p.words)) for p in _tr.PRIMITIVES if not p.var_valid
 ]
 
+# PHASE 3: detection (this table) and generation (KEYWORD_SYNONYMS) are
+# deliberately asymmetric. Detection runs against Plan-stage ENGLISH
+# PROSE, where an overly generic trigger word ("make", "run", "show",
+# "change") risks false-positive matches against unrelated prose
+# ("make sure...", "run the server", "change in", "showcasing") and
+# would over-widen the grammar rather than fix a real gap -- so only
+# the least ambiguous synonym per kind ("declare", "update", "display",
+# "invoke", "free") is added here. Generation is not similarly
+# constrained: KEYWORD_SYNONYMS only ever fires from GBNF-constrained
+# sampling of a Dictum statement, never from free-text matching, so the
+# collision risk that limits this table doesn't apply there.
 STMT_TRIGGERS = {
-    "keep": r"\bkeeps?\b",
-    "set": r"\bsets?\b",
-    "print": r"\bprints?\b",
-    "call": r"\bcalls?\b",
-    "release": r"\breleases?\b",
+    "keep": r"\b(?:keeps?|declares?)\b",
+    "set": r"\b(?:sets?|updates?)\b",
+    "print": r"\b(?:prints?|displays?)\b",
+    "call": r"\b(?:calls?|invokes?)\b",
+    "release": r"\b(?:releases?|frees?)\b",
 }
 
 # BUGFIX (found via kaggle/cell6_context_aware_gbnf_test.py's Phase 1
@@ -440,38 +513,6 @@ def _extract_param_names(text):
     return names
 
 
-def _action_names(text):
-    return set(re.findall(r"\baction\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-
-
-def _program_names(text):
-    return set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-
-
-def _shape_names(text):
-    return set(re.findall(r"\bshape\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-
-
-def _container_names(text):
-    """Every name this chunk uses to introduce a top-level declaration
-    (program/shape/action). GENERALIZABLE FIX (replaces per-tier hint
-    routing): these names are never legal reused as a field name,
-    parameter name, or variable target/reference -- doing so is the
-    mechanism behind the Tier4 failure documented in
-    normalize_dictum.py ("greet as age", "main as age" -- the model's
-    own action names leaking into an unrelated shape's field list).
-    That happened because every identifier-producing grammar slot drew
-    from the SAME chunk-global `idents` pool regardless of which role
-    it was filling. _dtype_identifier_candidates below already excludes
-    action/program names from the TYPE slot; this is the same exclusion
-    made available to every OTHER slot (see _member_name_candidates),
-    so the fix isn't specific to shapes, fields, or any one tier --
-    it applies to every position where a chunk introduces or references
-    a variable-role name, for any future pattern that mixes container
-    names with variable names the same way Tier4 did."""
-    return _action_names(text) | _program_names(text) | _shape_names(text)
-
-
 def _dtype_identifier_candidates(idents, text):
     """Role-scoped candidate list for dtype's user-defined-shape-type
     fallback: every extracted identifier EXCEPT names that are never
@@ -488,58 +529,24 @@ def _dtype_identifier_candidates(idents, text):
         return-type position via this exact path.
     Shape names ARE kept as candidates (a legitimate user-defined-type
     use, e.g. `keep Bob as Person` in Tier4)."""
-    exclude = _action_names(text) | _program_names(text) | _extract_param_names(text)
+    action_names = set(re.findall(r"\baction\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    program_names = set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    param_names = _extract_param_names(text)
+    exclude = action_names | program_names | param_names
     return [c for c in idents if c not in exclude]
 
 
-def _member_name_candidates(idents, text):
-    """Role-scoped pool for every identifier-producing slot EXCEPT a
-    top-level declaration's own name (program-decl/shape-decl/
-    action-decl, which legitimately draw from the full unfiltered
-    `identifier` pool since that slot IS the container name being
-    introduced). Used for: field-decl, param, keep/set/release targets,
-    repeat's loop variable, unsafe-param, and unary/primary variable
-    references -- i.e. every slot where a container name (action/
-    program/shape) showing up would be a bug, not a legitimate name,
-    the same class of bug _dtype_identifier_candidates already fixed
-    for the dtype slot specifically. This is what makes the fix
-    tier-agnostic: it's keyed on grammar ROLE (declaring a container vs.
-    naming/referencing a member), not on which of the five known tier
-    names produced the chunk."""
-    exclude = _container_names(text)
-    return [c for c in idents if c not in exclude]
-
-
-def _call_target_candidates(text):
-    """call-stmt's callee names an ACTION, never a variable -- routing
-    it through the general/member-name identifier pool is exactly how a
-    variable name became grammar-legal in call position. Scoped to
-    action names actually declared in this chunk's own text; falls back
-    to the open identifier class (via _identifier_rule's own
-    empty-candidates branch) when this chunk doesn't declare the action
-    being called (e.g. calling an action introduced in an earlier
-    chunk) -- same permissive-fallback contract every other role-scoped
-    rule here already uses, so this can only ever tighten generation,
-    never make a legitimate chunk unsatisfiable."""
-    called = set(re.findall(r"\bcall\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-    return sorted(_action_names(text) | called)
-
-
-def _identifier_rule(candidates, rule_name="identifier"):
+def _identifier_rule(candidates):
     """Tightest-safe identifier rule: if we found real candidate names,
     whitelist exactly those (Option A from the design doc). If we found
     none (a chunk whose desc text happens to name nothing we can
     recognize -- e.g. it only uses numbers/literals), fall back to the
     open identifier class rather than emit a rule with zero
-    alternatives, which would make the whole grammar unsatisfiable.
-    rule_name lets callers emit distinctly-scoped nonterminals
-    (identifier / member-name / call-target) instead of one shared
-    production reused across every grammar position."""
-    head = f"{rule_name:<13} ::="
+    alternatives, which would make the whole grammar unsatisfiable."""
     if not candidates:
-        return f'{head} [a-zA-Z_] [a-zA-Z0-9_]*'
+        return 'identifier    ::= [a-zA-Z_] [a-zA-Z0-9_]*'
     lits = " | ".join(f'"{c}"' for c in candidates)
-    return f'{head} {lits}'
+    return f'identifier    ::= {lits}'
 
 
 def _cmp_op_rule(found):
@@ -726,8 +733,8 @@ _TERMINALS_BASE = (
 _INTEGER_TERMINAL = f'integer       ::= {_NUMBER_DIGITS}'
 
 _UNARY = (
-    'unary         ::= "&" member-name | "*" member-name | "-" unary | primary\n'
-    'primary       ::= number | string | "true" | "false" | "nothing" | member-name'
+    'unary         ::= "&" identifier | "*" identifier | "-" unary | primary\n'
+    'primary       ::= number | string | "true" | "false" | "nothing" | identifier'
 )
 
 
@@ -735,15 +742,23 @@ def _stmt_rule(kinds, allow_all):
     """simple-stmt alternation, narrowed to only the kinds actually
     detected -- ONLY used for tiers where per-item granularity is fine
     enough to trust (TYPE, MEMORY, SAFETY). See module docstring for why
-    OPERATION/MODIFY always pass allow_all=True instead."""
+    OPERATION/MODIFY always pass allow_all=True instead.
+
+    PHASE 3: the trigger-keyword position for each kind now routes
+    through a *-kw nonterminal (defined below, per kind actually in
+    use) instead of a single hardcoded literal -- see KEYWORD_SYNONYMS.
+    keep-stmt's "as"/"with value" positions route through as-kw
+    (emitted centrally in generate(), alongside dtype -- field-decl and
+    param reference the same rule so all three stay in sync) and
+    with-value-kw (emitted here, since it's keep-stmt-only)."""
     print_and_tail = _bounded_repeat('" " "and" " " print-arg', _CHAIN_CAP, 0)
     call_and_tail = _bounded_repeat('" " "and" " " expr', _CHAIN_CAP, 0)
     all_kinds = {
-        "keep": 'keep-stmt     ::= "keep" " " member-name " " "as" " " dtype (" " "with" " " "value" " " expr)?',
-        "set": 'set-stmt      ::= "set" " " member-name " " "to" " " expr',
-        "print": f'print-stmt    ::= "print" " " "the" " " "text" " " print-arg {print_and_tail}',
-        "call": f'call-stmt     ::= "call" " " call-target (" " "with" " " expr {call_and_tail})? (" " "giving" " " member-name)?',
-        "release": 'release-stmt  ::= "release" " " member-name',
+        "keep": 'keep-stmt     ::= keep-kw " " identifier " " as-kw " " dtype (" " with-value-kw " " expr)?',
+        "set": 'set-stmt      ::= set-kw " " identifier " " "to" " " expr',
+        "print": f'print-stmt    ::= print-kw " " "the" " " "text" " " print-arg {print_and_tail}',
+        "call": f'call-stmt     ::= call-kw " " identifier (" " "with" " " expr {call_and_tail})? (" " "giving" " " identifier)?',
+        "release": 'release-stmt  ::= release-kw " " identifier',
     }
     use = set(all_kinds) if (allow_all or not kinds) else kinds
     alt_names = " | ".join(f"{k}-stmt" for k in all_kinds if k in use)
@@ -751,6 +766,9 @@ def _stmt_rule(kinds, allow_all):
     for k in all_kinds:
         if k in use:
             lines.append(all_kinds[k])
+            lines.append(f"{k}-kw".ljust(14) + f"::= {_kw_alt_gbnf(k)}")
+    if "keep" in use:
+        lines.append("with-value-kw ::= " + _connector_alt_gbnf("with_value"))
     return "\n".join(lines)
 
 
@@ -888,7 +906,7 @@ def generate(chunk):
         shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
         parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
         parts.append(f'shape-body    ::= {shape_body_gbnf}')
-        parts.append('field-decl    ::= member-name " " "as" " " dtype')
+        parts.append('field-decl    ::= identifier " " as-kw " " dtype')
     forced_return = None
     if "action" in allowed_top:
         # BUGFIX (Tier6/7): the "takes" clause used to always be offered
@@ -908,7 +926,7 @@ def generate(chunk):
             n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
             params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
             parts.append(f'params        ::= param {params_gbnf}'.rstrip())
-            parts.append('param         ::= member-name " " "as" " " dtype')
+            parts.append('param         ::= identifier " " as-kw " " dtype')
         else:
             parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
     parts.append("")
@@ -961,8 +979,6 @@ def generate(chunk):
         else:
             used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
             parts.append(_stmt_rule(stmt_kinds, body_allow_all))
-            if "call" in used_stmt_kinds:
-                parts.append(_identifier_rule(_call_target_candidates(text), rule_name="call-target"))
             parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
@@ -1000,12 +1016,12 @@ def generate(chunk):
         if include_while:
             parts.append('while-stmt    ::= "while" " " expr " " "repeat" "\\n" body2 indent1 "end" " " ("while" | "repeat")')
         if include_repeat:
-            parts.append('repeat-stmt   ::= "repeat" " " integer " " "times" " " "using" " " member-name "\\n" body2 indent1 "end" " " "repeat"')
+            parts.append('repeat-stmt   ::= "repeat" " " integer " " "times" " " "using" " " identifier "\\n" body2 indent1 "end" " " "repeat"')
         if unsafe:
             parts.append('unsafe-block  ::= "unsafe" ":"? "\\n" body2 indent1 "end" " " "unsafe"')
             unsafe_found = detect_unsafe_names(text)
             parts.append(_unsafe_token_rule(unsafe_found))
-            parts.append('unsafe-param  ::= member-name | integer')
+            parts.append('unsafe-param  ::= identifier | integer')
         parts.append("")
 
     has_ptr_ops = bool(re.search(r"[&*]\s*[A-Za-z_]", text))
@@ -1048,6 +1064,13 @@ def generate(chunk):
     if needs_dtype:
         dtype_ident_candidates = _dtype_identifier_candidates(idents, text)
         parts.append(_dtype_rule(dtype_found, dtype_ident_candidates))
+        # PHASE 3: as-kw is shared by keep-stmt, field-decl, and param --
+        # emitted once, centrally, here (rather than per call site) so
+        # all three stay referencing the same synonym set. Every branch
+        # that sets needs_dtype=True (shape/action present, or "keep" in
+        # used_stmt_kinds) is a branch where at least one of those three
+        # positions is actually emitted above, so this is never dead.
+        parts.append("as-kw         ::= " + _connector_alt_gbnf("as"))
         # return-dtype is only referenced when action-decl's produces slot
         # wasn't already forced to an exact literal (see
         # _detect_forced_return_dtype) -- avoids emitting an unreferenced
@@ -1056,7 +1079,6 @@ def generate(chunk):
             parts.append(_return_dtype_rule())
         parts.append("")
     parts.append(_identifier_rule(idents))
-    parts.append(_identifier_rule(_member_name_candidates(idents, text), rule_name="member-name"))
     parts.append(_TERMINALS_BASE)
     if include_repeat or unsafe:
         parts.append(_INTEGER_TERMINAL)

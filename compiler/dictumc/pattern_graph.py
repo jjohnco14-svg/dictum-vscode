@@ -276,6 +276,194 @@ def try_deterministic_expand(pattern_ref, text):
         return None
 
 
+# ---------------------------------------------------------------------
+# PHASE 2 -- general sequential-statement expansion.
+#
+# The section above only fires for two named, hand-registered
+# pattern_refs (atomic-increment, unsafe-malloc), each with its own
+# bespoke regex -- i.e. it's keyed on WHICH pattern the caller already
+# decided this is, the same "per-tier lookup" shape the grammar routing
+# problem had. But most of Tier3/5's real failures (Cell 12d) weren't
+# an unsafe-op idiom at all -- they were an ordinary `keep X as T [with
+# value V]` followed by a later reference to X, which is fully
+# mechanical (a straight transcription of the plan's own sentence
+# order into Dictum surface syntax) but still went through the
+# GBNF+LLM sampler because nothing recognized it as such. This section
+# generalizes the SAME "skip the model when nothing is left to decide"
+# principle to any chunk whose entire body is a plain sequence of
+# keep/set/print/call/release statements -- not keyed to a pattern_ref,
+# a tier name, or any hand-registered list, just to the grammatical
+# SHAPE of the plan text.
+#
+# Scope, and why each boundary is drawn where it is (bail = fall back
+# to the normal grammar+LLM path unchanged, per this module's existing
+# "never worse than before" contract):
+#   - No control-flow trigger (if/while/repeat) anywhere in the text.
+#     Loop/branch bodies require real judgment about what belongs
+#     inside vs. outside the block -- genuinely not mechanical.
+#   - No `unsafe` block, no `takes` clause (params need per-param type
+#     binding this pass doesn't attempt yet -- documented gap, not a
+#     silent guess).
+#   - No arithmetic/comparison phrase anywhere in the text -- a `value`
+#     slot here is only ever a literal, a string, or a bare variable
+#     reference, never an expression to evaluate.
+#   - Every trigger-to-next-trigger text span must match its clause
+#     regex WITH NOTHING LEFT OVER (past connector words/punctuation).
+#     Any leftover content means the plan said something this expander
+#     doesn't understand -- bail rather than guess.
+# ---------------------------------------------------------------------
+try:
+    from . import chunk_grammar as _cg
+except ImportError:  # pragma: no cover -- allows `python3 pattern_graph.py` standalone
+    import chunk_grammar as _cg
+
+_VALUE_RE = r'(?:"[^"\n]*"|-?\d+(?:\.\d+)?|[A-Za-z_]\w*)'
+_LEFTOVER_OK_RE = re.compile(r'^[\s.,:]*(?:\b(?:and|then)\b[\s.,:]*)*$', re.I)
+
+_SEQ_CLAUSE_PATTERNS = {
+    "keep": re.compile(
+        r'\bkeeps?\b\s+(?P<name>[A-Za-z_]\w*)\s+as\s+'
+        r'(?P<dtype>(?:(?!\bwith\b)[a-zA-Z]+)(?:\s+(?!\bwith\b)[a-zA-Z]+)?)'
+        r'(?:\s+with\s+value\s+(?P<value>' + _VALUE_RE + r'))?',
+        re.I,
+    ),
+    "set": re.compile(
+        r'\bsets?\b\s+(?P<name>[A-Za-z_]\w*)\s+to\s+(?P<value>' + _VALUE_RE + r')',
+        re.I,
+    ),
+    "print": re.compile(
+        r'\bprints?\b\s+(?:the\s+text\s+)?(?P<value>' + _VALUE_RE + r')',
+        re.I,
+    ),
+    "release": re.compile(r'\breleases?\b\s+(?P<name>[A-Za-z_]\w*)', re.I),
+    "call": re.compile(
+        r'\bcalls?\b\s+(?P<name>[A-Za-z_]\w*)'
+        r'(?:\s+with\s+(?P<arg>' + _VALUE_RE + r'))?'
+        r'(?:\s+giving\s+(?P<out>[A-Za-z_]\w*))?',
+        re.I,
+    ),
+}
+
+
+def _canonical_dtype(raw):
+    """Maps free-text dtype prose ('a whole number', 'Whole Number') to
+    the exact canonical phrase type_registry declares -- reuses
+    chunk_grammar.DTYPE_PHRASES (itself derived from type_registry.py,
+    see chunk_grammar's own DTYPE_PHRASES comment) so this can never
+    independently drift from the single source of truth. Returns None
+    (bail) on anything that isn't an exact, unambiguous primitive name
+    -- a real user-defined shape type is out of scope for this pass."""
+    norm = re.sub(r"^(a|an)\s+", "", raw.strip(), flags=re.I)
+    norm = re.sub(r"\s+", " ", norm).strip().lower()
+    for name, _lit in _cg.DTYPE_PHRASES:
+        if name.lower() == norm:
+            return name
+    return None
+
+
+def _plain_forced_return_dtype(text):
+    """Same detection _detect_forced_return_dtype in chunk_grammar.py
+    already does for the GBNF (a literal-quoted string); this returns
+    the plain surface phrase instead, since we're emitting real Dictum
+    text here, not a grammar rule. Kept as a thin wrapper over the same
+    DTYPE_PHRASES/RETURN_ONLY_DTYPE_PHRASES tables rather than a
+    hand-copied second list."""
+    if re.search(r"\bproduces\s+nothing\b", text, re.I):
+        return "nothing"
+    for name, _lit in _cg.DTYPE_PHRASES + _cg.RETURN_ONLY_DTYPE_PHRASES:
+        if re.search(r"\bproduces\s+" + re.escape(name).replace(r"\ ", r"\s+") + r"\b", text, re.I):
+            return name
+    if not re.search(r"\bproduces\b", text, re.I):
+        return "nothing"
+    return None
+
+
+def _render_seq_clause(kind, m):
+    """Turns one matched clause back into canonical Dictum surface
+    syntax. Returns None if a required sub-field failed to resolve
+    (e.g. an unrecognized dtype phrase) -- caller treats that exactly
+    like a non-match: bail the whole expansion."""
+    if kind == "keep":
+        dtype = _canonical_dtype(m.group("dtype"))
+        if dtype is None:
+            return None
+        line = f'keep {m.group("name")} as {dtype}'
+        if m.group("value"):
+            line += f' with value {m.group("value")}'
+        return line
+    if kind == "set":
+        return f'set {m.group("name")} to {m.group("value")}'
+    if kind == "print":
+        return f'print the text {m.group("value")}'
+    if kind == "release":
+        return f'release {m.group("name")}'
+    if kind == "call":
+        line = f'call {m.group("name")}'
+        if m.group("arg"):
+            line += f' with {m.group("arg")}'
+        if m.group("out"):
+            line += f' giving {m.group("out")}'
+        return line
+    return None  # unreachable -- kind always one of the five above
+
+
+def try_sequential_expand(chunk):
+    """General Phase-2 fast path: given a full chunk (same
+    {"tierName","items","unsafe"} shape chunk_grammar.generate() takes),
+    returns a complete Dictum action if its ENTIRE body is a mechanical
+    sequence of keep/set/print/call/release statements with no control
+    flow, no unsafe block, and no params -- else None (fall back to the
+    normal grammar+LLM path, unchanged from before this function
+    existed). See the module comment above for the exact scope
+    boundaries and why each one is drawn where it is."""
+    items = chunk.get("items") or []
+    if not items or chunk.get("unsafe"):
+        return None
+    text = _cg._all_desc(items)
+
+    if _cg.detect_control_kinds(text):
+        return None
+    if _cg.detect_unsafe_names(text):
+        return None
+    if re.search(r"\btakes\b", text, re.I):
+        return None
+    if _cg.detect_arith_ops(text) or _cg.detect_cmp_ops(text):
+        return None
+
+    action_name = _cg._extract_own_name(text)
+    if not action_name:
+        return None
+    return_dtype = _plain_forced_return_dtype(text)
+    if return_dtype is None:
+        return None
+
+    triggers = []
+    for kind, pat in _cg.STMT_TRIGGERS.items():
+        for tm in re.finditer(pat, text, re.I):
+            triggers.append((tm.start(), kind))
+    if not triggers:
+        return None
+    triggers.sort(key=lambda t: t[0])
+
+    lines = []
+    for i, (start, kind) in enumerate(triggers):
+        end = triggers[i + 1][0] if i + 1 < len(triggers) else len(text)
+        segment = text[start:end]
+        m = _SEQ_CLAUSE_PATTERNS[kind].match(segment)
+        if not m:
+            return None
+        leftover = segment[m.end():]
+        if not _LEFTOVER_OK_RE.match(leftover):
+            return None
+        line = _render_seq_clause(kind, m)
+        if line is None:
+            return None
+        lines.append(line)
+
+    body = "\n".join(f"    {ln}" for ln in lines)
+    return f"action {action_name} produces {return_dtype}:\n{body}\nend action"
+
+
 def render_context(pattern_ref, params=None):
     """Builds the human/model-facing few-shot context block for one
     pattern -- description, preconditions, common mistakes, the
@@ -321,6 +509,19 @@ def _bridge_main():
         pattern_ref = payload.get("pattern_ref", "")
         params = payload.get("params")
         plan_text = payload.get("plan_text")
+        chunk = payload.get("chunk")
+        # Phase 2 fast path: general sequential-statement expansion.
+        # Checked first and independently of pattern_ref -- this one
+        # isn't keyed to a named pattern at all, just to the shape of
+        # the chunk's own body. Additive: only taken if the caller
+        # supplies "chunk"; every existing caller that doesn't is
+        # byte-identical to before this existed.
+        if chunk:
+            sequential = try_sequential_expand(chunk)
+            if sequential is not None:
+                json.dump({"ok": True, "deterministic": True, "expansion": "sequential",
+                           "bound": sequential, "rendered": None}, _sys.stdout)
+                return
         # Optional fast path: only taken if the caller supplied plan_text
         # AND this pattern_ref is one of the fully-mechanical constructs
         # AND the text actually contains everything needed. Every other
@@ -331,7 +532,8 @@ def _bridge_main():
         if plan_text:
             deterministic = try_deterministic_expand(pattern_ref, plan_text)
             if deterministic is not None:
-                json.dump({"ok": True, "deterministic": True, "bound": deterministic, "rendered": None}, _sys.stdout)
+                json.dump({"ok": True, "deterministic": True, "expansion": "pattern",
+                           "bound": deterministic, "rendered": None}, _sys.stdout)
                 return
         rendered, bound = render_context(pattern_ref, params)
         json.dump({"ok": True, "deterministic": False, "rendered": rendered, "bound": bound}, _sys.stdout)

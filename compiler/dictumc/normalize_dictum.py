@@ -87,6 +87,63 @@ class NormalizationIncomplete(Exception):
 # ---------------------------------------------------------------------
 # Step A: collapse immediate repetition (single lines or short cycles)
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# PHASE 3 -- synonym canonicalization, companion to chunk_grammar.py's
+# KEYWORD_SYNONYMS/CONNECTOR_SYNONYMS. Build's GBNF now offers several
+# fluent alternates at five statement-trigger positions ("keep" |
+# "declare" | "make", etc.) plus two connector positions ("as" | "of
+# type", "with value" | "initialized to" | "starting at"), so the model
+# doesn't have to fight its own natural phrasing to stay grammar-legal.
+# Every OTHER pass in this file, and parser.py/emit_c.py downstream,
+# still only understand the ONE canonical spelling -- this function
+# reverses the substitution before anything else runs, so nothing past
+# this point needs to know synonyms exist at all.
+#
+# This is safe to do unconditionally (not a "best guess"): because
+# Build's decoding is grammar-CONSTRAINED, the raw text handed to this
+# module can only contain, at each of these positions, one of the exact
+# literal alternates chunk_grammar.py actually offered there. Reversing
+# a closed, known substitution set back to its one canonical spelling
+# is a deterministic rewrite, not a heuristic -- the same category of
+# operation as inject_closers() below, not a guess about model intent.
+#
+# SCOPE: matches chunk_grammar.py's KEYWORD_SYNONYMS/CONNECTOR_SYNONYMS
+# exactly -- five statement keywords (at statement-start position only,
+# where the grammar actually put them) and the two connector phrases
+# ("of type", "initialized to", "starting at"). Nothing wider than what
+# the grammar can actually produce is matched here, on purpose.
+# ---------------------------------------------------------------------
+_STMT_KW_CANON = {
+    "keep": "keep", "declare": "keep", "make": "keep",
+    "set": "set", "update": "set", "change": "set",
+    "print": "print", "display": "print", "show": "print",
+    "call": "call", "invoke": "call", "run": "call",
+    "release": "release", "free": "release", "deallocate": "release",
+}
+# Longest-first alternation so e.g. a hypothetical future "call" vs.
+# "calling" collision would prefer the more specific match -- not
+# currently ambiguous with today's word list, but cheap to keep correct.
+_STMT_KW_RE = re.compile(
+    r'^(\s*)(' + "|".join(sorted(_STMT_KW_CANON, key=len, reverse=True)) + r')\b',
+    re.M,
+)
+_OF_TYPE_RE = re.compile(r'\bof\s+type\b')
+_INIT_TO_RE = re.compile(r'\binitialized\s+to\b')
+_START_AT_RE = re.compile(r'\bstarting\s+at\b')
+
+
+def canonicalize_synonyms(text):
+    """Rewrites every chunk_grammar.py synonym alternate back to its one
+    canonical Dictum spelling. Idempotent -- running it twice is a
+    no-op, since the canonical spellings are themselves members of
+    their own synonym sets and map to themselves."""
+    text = _STMT_KW_RE.sub(lambda m: f"{m.group(1)}{_STMT_KW_CANON[m.group(2)]}", text)
+    text = _OF_TYPE_RE.sub("as", text)
+    text = _INIT_TO_RE.sub("with value", text)
+    text = _START_AT_RE.sub("with value", text)
+    return text
+
+
 def collapse_repetition(text, max_cycle=3):
     """Collapses a line, or a short (2-3 line) repeating cycle, that
     repeats 3+ times in a row down to ONE instance. Deliberately
@@ -308,11 +365,15 @@ def _detect_unrecoverable(text, plan_items):
 def normalize_dictum(raw, plan_items):
     """Runs the fixable-class passes in order, then checks for the
     unrecoverable signature and raises rather than returning something
-    that looks clean but isn't. Order matters: repetition collapse
-    first (so field/closer logic isn't confused by duplicate blocks),
-    then field filtering, then return-type, then closers last (closers
-    depend on the final, cleaned-up body)."""
+    that looks clean but isn't. Order matters: synonym canonicalization
+    FIRST (Phase 3 -- every regex below is written against the one
+    canonical spelling, so synonym rewriting has to happen before any
+    of them see the text), then repetition collapse (so field/closer
+    logic isn't confused by duplicate blocks), then field filtering,
+    then return-type, then closers last (closers depend on the final,
+    cleaned-up body)."""
     text = raw
+    text = canonicalize_synonyms(text)
     text = collapse_repetition(text)
     text = normalize_shape_fields(text, plan_items)
     text = normalize_produces_type(text, plan_items)
