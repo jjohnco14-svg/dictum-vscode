@@ -440,6 +440,38 @@ def _extract_param_names(text):
     return names
 
 
+def _action_names(text):
+    return set(re.findall(r"\baction\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+
+
+def _program_names(text):
+    return set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+
+
+def _shape_names(text):
+    return set(re.findall(r"\bshape\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+
+
+def _container_names(text):
+    """Every name this chunk uses to introduce a top-level declaration
+    (program/shape/action). GENERALIZABLE FIX (replaces per-tier hint
+    routing): these names are never legal reused as a field name,
+    parameter name, or variable target/reference -- doing so is the
+    mechanism behind the Tier4 failure documented in
+    normalize_dictum.py ("greet as age", "main as age" -- the model's
+    own action names leaking into an unrelated shape's field list).
+    That happened because every identifier-producing grammar slot drew
+    from the SAME chunk-global `idents` pool regardless of which role
+    it was filling. _dtype_identifier_candidates below already excludes
+    action/program names from the TYPE slot; this is the same exclusion
+    made available to every OTHER slot (see _member_name_candidates),
+    so the fix isn't specific to shapes, fields, or any one tier --
+    it applies to every position where a chunk introduces or references
+    a variable-role name, for any future pattern that mixes container
+    names with variable names the same way Tier4 did."""
+    return _action_names(text) | _program_names(text) | _shape_names(text)
+
+
 def _dtype_identifier_candidates(idents, text):
     """Role-scoped candidate list for dtype's user-defined-shape-type
     fallback: every extracted identifier EXCEPT names that are never
@@ -456,24 +488,58 @@ def _dtype_identifier_candidates(idents, text):
         return-type position via this exact path.
     Shape names ARE kept as candidates (a legitimate user-defined-type
     use, e.g. `keep Bob as Person` in Tier4)."""
-    action_names = set(re.findall(r"\baction\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-    program_names = set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-    param_names = _extract_param_names(text)
-    exclude = action_names | program_names | param_names
+    exclude = _action_names(text) | _program_names(text) | _extract_param_names(text)
     return [c for c in idents if c not in exclude]
 
 
-def _identifier_rule(candidates):
+def _member_name_candidates(idents, text):
+    """Role-scoped pool for every identifier-producing slot EXCEPT a
+    top-level declaration's own name (program-decl/shape-decl/
+    action-decl, which legitimately draw from the full unfiltered
+    `identifier` pool since that slot IS the container name being
+    introduced). Used for: field-decl, param, keep/set/release targets,
+    repeat's loop variable, unsafe-param, and unary/primary variable
+    references -- i.e. every slot where a container name (action/
+    program/shape) showing up would be a bug, not a legitimate name,
+    the same class of bug _dtype_identifier_candidates already fixed
+    for the dtype slot specifically. This is what makes the fix
+    tier-agnostic: it's keyed on grammar ROLE (declaring a container vs.
+    naming/referencing a member), not on which of the five known tier
+    names produced the chunk."""
+    exclude = _container_names(text)
+    return [c for c in idents if c not in exclude]
+
+
+def _call_target_candidates(text):
+    """call-stmt's callee names an ACTION, never a variable -- routing
+    it through the general/member-name identifier pool is exactly how a
+    variable name became grammar-legal in call position. Scoped to
+    action names actually declared in this chunk's own text; falls back
+    to the open identifier class (via _identifier_rule's own
+    empty-candidates branch) when this chunk doesn't declare the action
+    being called (e.g. calling an action introduced in an earlier
+    chunk) -- same permissive-fallback contract every other role-scoped
+    rule here already uses, so this can only ever tighten generation,
+    never make a legitimate chunk unsatisfiable."""
+    called = set(re.findall(r"\bcall\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    return sorted(_action_names(text) | called)
+
+
+def _identifier_rule(candidates, rule_name="identifier"):
     """Tightest-safe identifier rule: if we found real candidate names,
     whitelist exactly those (Option A from the design doc). If we found
     none (a chunk whose desc text happens to name nothing we can
     recognize -- e.g. it only uses numbers/literals), fall back to the
     open identifier class rather than emit a rule with zero
-    alternatives, which would make the whole grammar unsatisfiable."""
+    alternatives, which would make the whole grammar unsatisfiable.
+    rule_name lets callers emit distinctly-scoped nonterminals
+    (identifier / member-name / call-target) instead of one shared
+    production reused across every grammar position."""
+    head = f"{rule_name:<13} ::="
     if not candidates:
-        return 'identifier    ::= [a-zA-Z_] [a-zA-Z0-9_]*'
+        return f'{head} [a-zA-Z_] [a-zA-Z0-9_]*'
     lits = " | ".join(f'"{c}"' for c in candidates)
-    return f'identifier    ::= {lits}'
+    return f'{head} {lits}'
 
 
 def _cmp_op_rule(found):
@@ -660,8 +726,8 @@ _TERMINALS_BASE = (
 _INTEGER_TERMINAL = f'integer       ::= {_NUMBER_DIGITS}'
 
 _UNARY = (
-    'unary         ::= "&" identifier | "*" identifier | "-" unary | primary\n'
-    'primary       ::= number | string | "true" | "false" | "nothing" | identifier'
+    'unary         ::= "&" member-name | "*" member-name | "-" unary | primary\n'
+    'primary       ::= number | string | "true" | "false" | "nothing" | member-name'
 )
 
 
@@ -673,11 +739,11 @@ def _stmt_rule(kinds, allow_all):
     print_and_tail = _bounded_repeat('" " "and" " " print-arg', _CHAIN_CAP, 0)
     call_and_tail = _bounded_repeat('" " "and" " " expr', _CHAIN_CAP, 0)
     all_kinds = {
-        "keep": 'keep-stmt     ::= "keep" " " identifier " " "as" " " dtype (" " "with" " " "value" " " expr)?',
-        "set": 'set-stmt      ::= "set" " " identifier " " "to" " " expr',
+        "keep": 'keep-stmt     ::= "keep" " " member-name " " "as" " " dtype (" " "with" " " "value" " " expr)?',
+        "set": 'set-stmt      ::= "set" " " member-name " " "to" " " expr',
         "print": f'print-stmt    ::= "print" " " "the" " " "text" " " print-arg {print_and_tail}',
-        "call": f'call-stmt     ::= "call" " " identifier (" " "with" " " expr {call_and_tail})? (" " "giving" " " identifier)?',
-        "release": 'release-stmt  ::= "release" " " identifier',
+        "call": f'call-stmt     ::= "call" " " call-target (" " "with" " " expr {call_and_tail})? (" " "giving" " " member-name)?',
+        "release": 'release-stmt  ::= "release" " " member-name',
     }
     use = set(all_kinds) if (allow_all or not kinds) else kinds
     alt_names = " | ".join(f"{k}-stmt" for k in all_kinds if k in use)
@@ -822,7 +888,7 @@ def generate(chunk):
         shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
         parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
         parts.append(f'shape-body    ::= {shape_body_gbnf}')
-        parts.append('field-decl    ::= identifier " " "as" " " dtype')
+        parts.append('field-decl    ::= member-name " " "as" " " dtype')
     forced_return = None
     if "action" in allowed_top:
         # BUGFIX (Tier6/7): the "takes" clause used to always be offered
@@ -842,7 +908,7 @@ def generate(chunk):
             n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
             params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
             parts.append(f'params        ::= param {params_gbnf}'.rstrip())
-            parts.append('param         ::= identifier " " "as" " " dtype')
+            parts.append('param         ::= member-name " " "as" " " dtype')
         else:
             parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
     parts.append("")
@@ -895,6 +961,8 @@ def generate(chunk):
         else:
             used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
             parts.append(_stmt_rule(stmt_kinds, body_allow_all))
+            if "call" in used_stmt_kinds:
+                parts.append(_identifier_rule(_call_target_candidates(text), rule_name="call-target"))
             parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
@@ -932,12 +1000,12 @@ def generate(chunk):
         if include_while:
             parts.append('while-stmt    ::= "while" " " expr " " "repeat" "\\n" body2 indent1 "end" " " ("while" | "repeat")')
         if include_repeat:
-            parts.append('repeat-stmt   ::= "repeat" " " integer " " "times" " " "using" " " identifier "\\n" body2 indent1 "end" " " "repeat"')
+            parts.append('repeat-stmt   ::= "repeat" " " integer " " "times" " " "using" " " member-name "\\n" body2 indent1 "end" " " "repeat"')
         if unsafe:
             parts.append('unsafe-block  ::= "unsafe" ":"? "\\n" body2 indent1 "end" " " "unsafe"')
             unsafe_found = detect_unsafe_names(text)
             parts.append(_unsafe_token_rule(unsafe_found))
-            parts.append('unsafe-param  ::= identifier | integer')
+            parts.append('unsafe-param  ::= member-name | integer')
         parts.append("")
 
     has_ptr_ops = bool(re.search(r"[&*]\s*[A-Za-z_]", text))
@@ -988,6 +1056,7 @@ def generate(chunk):
             parts.append(_return_dtype_rule())
         parts.append("")
     parts.append(_identifier_rule(idents))
+    parts.append(_identifier_rule(_member_name_candidates(idents, text), rule_name="member-name"))
     parts.append(_TERMINALS_BASE)
     if include_repeat or unsafe:
         parts.append(_INTEGER_TERMINAL)
