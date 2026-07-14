@@ -536,6 +536,22 @@ def _dtype_identifier_candidates(idents, text):
     return [c for c in idents if c not in exclude]
 
 
+def _plain_identifier_candidates(idents, text):
+    """Role-scoped candidate list for the general `identifier` terminal
+    (field/param/keep/call/print names and expr references). Excludes
+    shape and program names: a user-defined TYPE is only ever legally
+    referenced through `dtype` (see _dtype_identifier_candidates just
+    above), never through a bare `identifier` -- leaving it in this pool
+    let the model pick a shape's own name as a parameter or variable
+    name (e.g. `action greet takes Item as Item`), which is exactly what
+    P1_RoleScoped_Call was hitting. Action names are deliberately KEPT
+    here -- `call greet` is a legitimate identifier use."""
+    shape_names = set(re.findall(r"\bshape\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    program_names = set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    exclude = shape_names | program_names
+    return [c for c in idents if c not in exclude]
+
+
 def _identifier_rule(candidates):
     """Tightest-safe identifier rule: if we found real candidate names,
     whitelist exactly those (Option A from the design doc). If we found
@@ -918,7 +934,29 @@ def generate(chunk):
         # `takes ... and unsafe_demo as raw pointer to count`). Only
         # offer the clause at all when the plan text has a "takes" (or an
         # explicit "as"-typed parameter list) to justify it.
-        has_takes_clause = bool(re.search(r"\btakes\b", text, re.I))
+        # BUGFIX (Tier6/7): the "takes" clause used to always be offered
+        # as optional, even when the plan text never mentions parameters
+        # at all -- giving the model room to invent a takes-clause out of
+        # thin air (and, since the same unrestricted `identifier` rule
+        # was used for the new param name, reuse the action's OWN name
+        # as that param, as seen in Tier6's
+        # `takes ... and unsafe_demo as raw pointer to count`). Only
+        # offer the clause at all when the plan text has a "takes" (or an
+        # explicit "as"-typed parameter list) to justify it.
+        #
+        # BUGFIX (P1_RoleScoped_Call): the naive `\btakes\b` check also
+        # fired on the literal phrase "takes nothing" -- which parser.py
+        # already treats as explicit zero-params syntax, not a param
+        # list -- and routed it into the SAME parameterized grammar
+        # below, whose `params` rule structurally requires at least one
+        # real parameter (see n_params = max(1, ...)). That left the
+        # model no way to satisfy the grammar without inventing a fake
+        # parameter for every action whose plan says "takes nothing",
+        # which is exactly what produced `takes Item as Item` (reusing
+        # the shape's own type name) and the resulting dangling
+        # reference to a field name that was never actually a param.
+        forced_takes_nothing = bool(re.search(r"\btakes\s+nothing\b", text, re.I))
+        has_takes_clause = (not forced_takes_nothing) and bool(re.search(r"\btakes\b", text, re.I))
         forced_return = _detect_forced_return_dtype(text)
         return_ref = forced_return if forced_return else "return-dtype"
         if has_takes_clause:
@@ -927,6 +965,8 @@ def generate(chunk):
             params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
             parts.append(f'params        ::= param {params_gbnf}'.rstrip())
             parts.append('param         ::= identifier " " as-kw " " dtype')
+        elif forced_takes_nothing:
+            parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " "nothing" " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
         else:
             parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
     parts.append("")
@@ -1078,7 +1118,7 @@ def generate(chunk):
         if "action" in allowed_top and forced_return is None:
             parts.append(_return_dtype_rule())
         parts.append("")
-    parts.append(_identifier_rule(idents))
+    parts.append(_identifier_rule(_plain_identifier_candidates(idents, text)))
     parts.append(_TERMINALS_BASE)
     if include_repeat or unsafe:
         parts.append(_INTEGER_TERMINAL)
