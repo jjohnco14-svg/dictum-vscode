@@ -332,7 +332,7 @@ _SEQ_CLAUSE_PATTERNS = {
         re.I,
     ),
     "print": re.compile(
-        r'\bprints?\b\s+(?:the\s+text\s+)?(?P<value>' + _VALUE_RE + r')',
+        r'\bprints?\b\s+(?:the\s+[a-zA-Z]+(?:\s+[a-zA-Z]+)?\s+)?(?P<value>' + _VALUE_RE + r')',
         re.I,
     ),
     "release": re.compile(r'\breleases?\b\s+(?P<name>[A-Za-z_]\w*)', re.I),
@@ -437,9 +437,18 @@ def try_sequential_expand(chunk):
     if return_dtype is None:
         return None
 
+    # Scan for statement triggers only in the BODY, i.e. after the
+    # "action <name>" declaration itself. Without this, an action whose
+    # own name happens to collide with a trigger synonym (e.g. an
+    # action literally named "update", which STMT_TRIGGERS also treats
+    # as a "set" synonym) spuriously self-triggers on its own header
+    # and corrupts the trigger ordering below.
+    header_m = re.search(r"\b(?:program|shape|action)\s+[A-Za-z_][A-Za-z0-9_]*", text, re.I)
+    body_text = text[header_m.end():] if header_m else text
+
     triggers = []
     for kind, pat in _cg.STMT_TRIGGERS.items():
-        for tm in re.finditer(pat, text, re.I):
+        for tm in re.finditer(pat, body_text, re.I):
             triggers.append((tm.start(), kind))
     if not triggers:
         return None
@@ -447,8 +456,8 @@ def try_sequential_expand(chunk):
 
     lines = []
     for i, (start, kind) in enumerate(triggers):
-        end = triggers[i + 1][0] if i + 1 < len(triggers) else len(text)
-        segment = text[start:end]
+        end = triggers[i + 1][0] if i + 1 < len(triggers) else len(body_text)
+        segment = body_text[start:end]
         m = _SEQ_CLAUSE_PATTERNS[kind].match(segment)
         if not m:
             return None
