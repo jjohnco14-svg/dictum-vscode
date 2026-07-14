@@ -388,8 +388,15 @@ def _render_seq_clause(kind, m):
         if dtype is None:
             return None
         line = f'keep {m.group("name")} as {dtype}'
-        if m.group("value"):
-            line += f' with value {m.group("value")}'
+        value = m.group("value")
+        if value:
+            # A bare word given as the value for a `text` keep is meant
+            # as a string literal (e.g. "with value Hello"), not an
+            # identifier reference -- quote it so the parser doesn't
+            # misread it as a use of an undeclared variable.
+            if dtype == "text" and not value.startswith('"'):
+                value = f'"{value}"'
+            line += f' with value {value}'
         return line
     if kind == "set":
         return f'set {m.group("name")} to {m.group("value")}'
