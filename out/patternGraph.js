@@ -16,6 +16,7 @@
 // first).
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.renderPatternContext = renderPatternContext;
+exports.tryDeterministicExpand = tryDeterministicExpand;
 exports.listPatterns = listPatterns;
 
 const { spawn } = require("child_process");
@@ -99,6 +100,31 @@ function renderPatternContext(ext, pythonPath, patternRef, params, timeoutMs = 5
     if (params !== undefined && params !== null) {
         payload.params = params;
     }
+    return _runBridge(ext, pythonPath, "pattern_graph.py", ["--bridge"], payload, timeoutMs);
+}
+
+/**
+ * Fast path for the small set of patterns whose Dictum expansion is
+ * fully mechanical given just the plan text (currently atomic-increment
+ * and unsafe-malloc -- see pattern_graph.py's _DETERMINISTIC_REFS).
+ * Returns one of:
+ *   { ok: true, deterministic: true, bound: <ready-to-use Dictum text> }
+ *     -- this chunk's plan text contained everything needed; the
+ *        caller can skip the model call entirely for this chunk.
+ *   { ok: true, deterministic: false, rendered: <few-shot text>, bound: null }
+ *     -- not a mechanical pattern, or the plan text didn't have enough
+ *        (e.g. no explicit delta) -- same as calling renderPatternContext
+ *        directly; caller should fall back to the normal LLM path.
+ *   { ok: false, detail } | { ok: null }
+ *     -- same fallback contract as renderPatternContext: never block a
+ *        build on this, just proceed as if it returned deterministic:false.
+ *
+ * planText should be the chunk's own combined plan-item text (same
+ * string patternMatch.js's matchPatternRef was given), NOT the whole
+ * plan -- extraction is scoped to one chunk's action/target/delta.
+ */
+function tryDeterministicExpand(ext, pythonPath, patternRef, planText, timeoutMs = 5000) {
+    const payload = { pattern_ref: patternRef, plan_text: planText };
     return _runBridge(ext, pythonPath, "pattern_graph.py", ["--bridge"], payload, timeoutMs);
 }
 

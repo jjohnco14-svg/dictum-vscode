@@ -199,6 +199,83 @@ def bind_pattern(pattern_ref, params=None):
     return bound
 
 
+# ---------------------------------------------------------------------
+# Deterministic expansion: for the small set of patterns whose template
+# is FULLY mechanical given just a couple of plan-text values (no
+# synthesis, no judgment call), skip the model entirely instead of
+# hoping a few-shot example is enough. This is narrower than
+# render_context's few-shot path on purpose -- see the module docstring
+# above render_context for the general (model-still-writes-it) case.
+# Motivating data (Cell 12c, Tier7): even WITH the correct pattern
+# example in context, a 2B model collapsed `{target}Ptr`/`{target}Result`
+# into `Counter` itself (`keep Counter as raw pointer ... value
+# &Counter`) or substituted an entirely different primitive (`release
+# Counter`) -- deriving two new distinct identifiers by concatenation
+# and threading them through a 3-statement + 3-arg-call structure is
+# multi-step synthesis this class of model doesn't reliably do, no
+# matter how the prompt is worded. But the expansion itself needs zero
+# judgment: given `target` and `delta`, `{target}Ptr`/`{target}Result`
+# and the full 5-line body are 100% determined -- exactly the kind of
+# thing this codebase already does at Build time elsewhere (see
+# chunk_grammar.py's _detect_forced_return_dtype).
+# ---------------------------------------------------------------------
+_DETERMINISTIC_REFS = frozenset({"atomic-increment", "unsafe-malloc"})
+
+_ACTION_NAME_RE = re.compile(r"\baction\s+([A-Za-z_]\w*)", re.I)
+# Tolerant of whatever separator the plan prose uses between the token
+# name and its values ("ATOMIC_FAA Counter 1", "ATOMIC_FAA: Counter, 1",
+# ...) -- \D+? (non-digit, non-greedy) between pieces rather than a
+# literal space, since plan text isn't guaranteed to be single-spaced.
+_ATOMIC_FAA_RE = re.compile(r"\bATOMIC_FAA\b\D*?([A-Za-z_]\w*)\D+?(-?\d+)", re.I)
+_RAW_MALLOC_RE = re.compile(r"\bRAW_MALLOC\b\D*?(-?\d+)\D+?([A-Za-z_]\w*)", re.I)
+
+
+def extract_deterministic_params(pattern_ref, text):
+    """Best-effort extraction of the params a mechanical pattern needs,
+    straight out of a chunk's own combined plan-item text -- no model
+    call, no LLM output involved yet. Returns a dict on success, None
+    if the text doesn't contain everything needed (caller falls back to
+    the normal few-shot+LLM path in that case -- this is always an
+    optional fast path, never a required one, so a miss here can never
+    make anything worse than before this function existed)."""
+    if pattern_ref not in _DETERMINISTIC_REFS:
+        return None
+    action_m = _ACTION_NAME_RE.search(text)
+    if not action_m:
+        return None
+    action_name = action_m.group(1)
+
+    if pattern_ref == "atomic-increment":
+        m = _ATOMIC_FAA_RE.search(text)
+        if not m:
+            return None
+        return {"action_name": action_name, "target": m.group(1), "delta": m.group(2)}
+
+    if pattern_ref == "unsafe-malloc":
+        m = _RAW_MALLOC_RE.search(text)
+        if not m:
+            return None
+        return {"action_name": action_name, "size": m.group(1), "buffer": m.group(2)}
+
+    return None  # unreachable given the _DETERMINISTIC_REFS check above
+
+
+def try_deterministic_expand(pattern_ref, text):
+    """Returns a ready-to-use, already-correct Dictum snippet for this
+    chunk if (a) pattern_ref is one of the fully-mechanical constructs
+    and (b) the chunk's own plan text contains everything needed to
+    bind it -- else None, meaning "fall back to the model as normal".
+    Never raises: a malformed/missing pattern file or a binding
+    failure both just mean this fast path doesn't apply this time."""
+    params = extract_deterministic_params(pattern_ref, text)
+    if params is None:
+        return None
+    try:
+        return bind_pattern(pattern_ref, params)
+    except (PatternNotFound, PatternBindingError):
+        return None
+
+
 def render_context(pattern_ref, params=None):
     """Builds the human/model-facing few-shot context block for one
     pattern -- description, preconditions, common mistakes, the
@@ -243,8 +320,21 @@ def _bridge_main():
         payload = json.load(_sys.stdin)
         pattern_ref = payload.get("pattern_ref", "")
         params = payload.get("params")
+        plan_text = payload.get("plan_text")
+        # Optional fast path: only taken if the caller supplied plan_text
+        # AND this pattern_ref is one of the fully-mechanical constructs
+        # AND the text actually contains everything needed. Every other
+        # case (plan_text omitted, pattern not mechanical, extraction
+        # miss) falls straight through to the existing render_context
+        # behavior unchanged -- old callers that never pass plan_text
+        # get byte-identical output to before, plus one new additive key.
+        if plan_text:
+            deterministic = try_deterministic_expand(pattern_ref, plan_text)
+            if deterministic is not None:
+                json.dump({"ok": True, "deterministic": True, "bound": deterministic, "rendered": None}, _sys.stdout)
+                return
         rendered, bound = render_context(pattern_ref, params)
-        json.dump({"ok": True, "rendered": rendered, "bound": bound}, _sys.stdout)
+        json.dump({"ok": True, "deterministic": False, "rendered": rendered, "bound": bound}, _sys.stdout)
     except (PatternNotFound, PatternSchemaError, PatternBindingError) as e:
         json.dump({"ok": False, "detail": str(e)}, _sys.stdout)
     except Exception as e:

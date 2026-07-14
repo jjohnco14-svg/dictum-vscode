@@ -805,17 +805,38 @@ async function _runBuild(ext) {
             // bridge failure (null/ok:false) just means no example gets
             // added — never a build failure, never a retry burned on it.
             let patternContext = null;
+            let deterministicText = null;
             if (cfg.patternHints) {
                 const matchedRef = (0, patternMatch_1.matchPatternRef)(chunk.tierName, chunk.items);
                 if (matchedRef) {
-                    const rendered = await (0, patternGraph_1.renderPatternContext)(ext, cfg.pythonPath, matchedRef);
-                    if (rendered && rendered.ok === true && rendered.rendered) {
-                        patternContext = rendered.rendered;
+                    // Fast path first: a handful of constructs (ATOMIC_FAA,
+                    // RAW_MALLOC+RAW_FREE) are fully mechanical given the
+                    // plan text alone -- deriving {target}Ptr/{target}Result
+                    // by concatenation, or pairing size+buffer into the
+                    // right RAW_MALLOC/RAW_FREE call shape, needs zero
+                    // judgment. Cell 12c showed a 2B model getting this
+                    // wrong even WITH the correct example in context
+                    // (collapsing Counter/CounterPtr into one identifier,
+                    // or substituting `call`/`release` for the unsafe
+                    // token) -- so for these specific constructs, skip
+                    // asking the model at all rather than hoping the
+                    // few-shot example lands this time.
+                    const combinedPlanText = chunk.items.map((it) => it && it.desc ? it.desc : '').join(' ');
+                    const det = await (0, patternGraph_1.tryDeterministicExpand)(ext, cfg.pythonPath, matchedRef, combinedPlanText);
+                    if (det && det.ok === true && det.deterministic === true && typeof det.bound === 'string') {
+                        deterministicText = det.bound;
+                        _panel.postStatus(`Chunk ${chunk.index + 1}/${chunks.length} — ${matchedRef}: mechanical construct, expanding deterministically (no model call).`);
+                    }
+                    else {
+                        const rendered = await (0, patternGraph_1.renderPatternContext)(ext, cfg.pythonPath, matchedRef);
+                        if (rendered && rendered.ok === true && rendered.rendered) {
+                            patternContext = rendered.rendered;
+                        }
                     }
                 }
             }
             const result = await _runBuildChunk(ext, {
-                url, key, model, grammar: chunkGrammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar: accumulated, patternContext,
+                url, key, model, grammar: chunkGrammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar: accumulated, patternContext, deterministicText,
             });
             accumulated = result.accumulated;
             if (!result.ok) {
@@ -969,7 +990,7 @@ async function _generateChunkDictumText(ext, o) {
     }
 }
 async function _runBuildChunk(ext, ctx) {
-    const { url, key, model, grammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar, patternContext } = ctx;
+    const { url, key, model, grammar, systemBase, backend, cfg, chunk, uri, baseCorrectionContext, accumulatedSoFar, patternContext, deterministicText } = ctx;
     let chunkRetryState = (0, retryLoop_1.freshRetryState)();
     let chunkCorrectionContext = '';
     // eslint-disable-next-line no-constant-condition
@@ -1015,11 +1036,26 @@ async function _runBuildChunk(ext, ctx) {
                 _panel.postGraph((0, graph_1.getNodes)(), (0, graph_1.getEdges)());
             }
         }
-        let chunkText = await _generateChunkDictumText(ext, {
-            url, key, model, provider: _provider, cfg,
-            system, prompt, grammar, tierName: chunk.tierName,
-            accumulatedSoFar, onProgress,
-        });
+        // Deterministic fast path only on this chunk's FIRST attempt --
+        // the template is validated across 20 variations so it should
+        // always clear L2/L3, but if something about THIS call site
+        // still trips a check, retrying with the same static text would
+        // just repeat the identical failure forever. Falling back to the
+        // normal model+correction-context path on retry keeps the
+        // existing retry loop as a safety net rather than a dead end.
+        const useDeterministic = chunkRetryState.attempt === 0 && typeof deterministicText === 'string';
+        let chunkText;
+        if (useDeterministic) {
+            chunkText = deterministicText;
+            onProgress(accumulatedSoFar + chunkText);
+        }
+        else {
+            chunkText = await _generateChunkDictumText(ext, {
+                url, key, model, provider: _provider, cfg,
+                system, prompt, grammar, tierName: chunk.tierName,
+                accumulatedSoFar, onProgress,
+            });
+        }
         // Normalize-or-refuse, BEFORE this chunk's text is merged into the
         // accumulated source or checked by L2/L3. Two outcomes:
         //   ok:true  -- fixable-class mistake (repetition, an unplanned/
