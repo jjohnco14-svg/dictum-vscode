@@ -227,9 +227,24 @@ def inject_closers(text):
     shape/action/while/repeat/if/unsafe) and appends whatever `end`s are
     missing at EOF. Does not try to fix a closer in the wrong PLACE
     (that's a structural error the retry loop should catch), only ones
-    missing at the end."""
+    missing at the end.
+
+    BUGFIX (Cell 12c, Tier3): closers used to be appended as bare
+    `end {kind}` with no indentation at all, regardless of where the
+    opener sat. That's fine for top-level `action`/`shape`/`program`
+    (indent ""), but a `while`/`if`/`unsafe` nested inside an action
+    opens at e.g. 4 spaces, and the parser expects its `end while` at
+    that SAME indentation -- confirmed live: cell12c_results.json's
+    Tier3 hint=True case had the model burn its whole token budget on a
+    runaway number before reaching `end while`, this function correctly
+    detected the missing closer, but emitted it at column 0, and the
+    parser then rejected the synthetic `end while` as a stray
+    top-level statement ("Unknown top-level 'while' at line 5"). Each
+    stack entry now carries the opener's own indentation string, and
+    the closer is emitted at that same indentation instead of always
+    at zero."""
     lines = text.split("\n")
-    stack = []
+    stack = []  # list of (kind, indent_str)
     for line in lines:
         stripped = line.strip()
         if re.match(r'^end\b', stripped):
@@ -238,12 +253,14 @@ def inject_closers(text):
             continue
         for pat, (kind, _) in _OPENERS.items():
             if re.match(pat, line, re.I):
-                stack.append(kind)
+                indent_str = line[:len(line) - len(line.lstrip(" "))]
+                stack.append((kind, indent_str))
                 break
     closers = []
     while stack:
-        kind = stack.pop()
-        closers.append(f"end {kind}" if kind != "if" else "end if")
+        kind, indent_str = stack.pop()
+        label = "end if" if kind == "if" else f"end {kind}"
+        closers.append(f"{indent_str}{label}")
     if closers:
         text = text.rstrip("\n") + "\n" + "\n".join(closers) + "\n"
     return text

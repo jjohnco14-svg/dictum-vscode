@@ -617,8 +617,18 @@ def _unsafe_token_rule(found):
     return "\n".join(lines)
 
 
+_NUMBER_DIGITS = _bounded_repeat('[0-9]', 12, 1)
 _TERMINALS_BASE = (
-    'number        ::= [0-9]+ ("." [0-9]+)?\n'
+    # BUGFIX (Cell 12c, Tier3): this was `[0-9]+`, the one terminal that
+    # never got folded into the _bounded_repeat pass everything else in
+    # this file went through. Under grammar constraint the sampler ran
+    # away and emitted ~170 digits into a print statement, burning the
+    # entire token budget before the model ever reached `end while`/`end
+    # action` -- confirmed live in cell12c_results.json's Tier3 hint=True
+    # raw output. Bounding at 12 digits (comfortably covers 32/64-bit
+    # integer literals) closes this off the same way every other rule
+    # here already is.
+    f'number        ::= {_NUMBER_DIGITS} ("." {_NUMBER_DIGITS})?\n'
     # BUGFIX (Cell 9 results, Tier4): the old string terminal --
     # [^"\n]* -- allowed absolutely any character between the quotes,
     # which is exactly what let the model reach for a Python-f-string
@@ -647,7 +657,7 @@ _TERMINALS_BASE = (
     'indent1       ::= "    "\n'
     'indent2       ::= "        "'
 )
-_INTEGER_TERMINAL = 'integer       ::= [0-9]+'
+_INTEGER_TERMINAL = f'integer       ::= {_NUMBER_DIGITS}'
 
 _UNARY = (
     'unary         ::= "&" identifier | "*" identifier | "-" unary | primary\n'
