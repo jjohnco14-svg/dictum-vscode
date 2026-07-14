@@ -536,22 +536,6 @@ def _dtype_identifier_candidates(idents, text):
     return [c for c in idents if c not in exclude]
 
 
-def _plain_identifier_candidates(idents, text):
-    """Role-scoped candidate list for the general `identifier` terminal
-    (field/param/keep/call/print names and expr references). Excludes
-    shape and program names: a user-defined TYPE is only ever legally
-    referenced through `dtype` (see _dtype_identifier_candidates just
-    above), never through a bare `identifier` -- leaving it in this pool
-    let the model pick a shape's own name as a parameter or variable
-    name (e.g. `action greet takes Item as Item`), which is exactly what
-    P1_RoleScoped_Call was hitting. Action names are deliberately KEPT
-    here -- `call greet` is a legitimate identifier use."""
-    shape_names = set(re.findall(r"\bshape\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-    program_names = set(re.findall(r"\bprogram\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
-    exclude = shape_names | program_names
-    return [c for c in idents if c not in exclude]
-
-
 def _identifier_rule(candidates):
     """Tightest-safe identifier rule: if we found real candidate names,
     whitelist exactly those (Option A from the design doc). If we found
@@ -1118,7 +1102,7 @@ def generate(chunk):
         if "action" in allowed_top and forced_return is None:
             parts.append(_return_dtype_rule())
         parts.append("")
-    parts.append(_identifier_rule(_plain_identifier_candidates(idents, text)))
+    parts.append(_identifier_rule(idents))
     parts.append(_TERMINALS_BASE)
     if include_repeat or unsafe:
         parts.append(_INTEGER_TERMINAL)
