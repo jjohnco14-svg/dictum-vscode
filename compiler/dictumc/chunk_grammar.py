@@ -197,9 +197,120 @@ RESERVED_WORDS = {
     # these may ever be offered back as a candidate identifier.
     "declare", "update", "change", "display", "show", "invoke", "run",
     "free", "deallocate", "of", "type", "initialized", "starting",
+    # ROOT-CAUSE FIX (Cell 13, N1/N2/N6/N8/N10/C1/C4/C6/C8/C10/V1-V5 --
+    # the majority of this test matrix's @parse and review_L2 failures):
+    # this set was hand-maintained as its OWN small copy of grammar.py's
+    # KEYWORDS (see the module comment above), and had silently drifted
+    # 77 real keywords behind it -- confirmed by diffing the two sets
+    # directly, not guessed. `produce`/`success`/`failure` are the
+    # biggest offenders (every plan item using Dictum's real
+    # `produce success with ...` / `produce failure with ...` surface
+    # syntax -- which is most of them -- leaked those three words
+    # straight into extract_identifiers()'s candidate pool), but
+    # `sum`/`product`/`quotient`/`remainder` (real prefix-arithmetic
+    # keywords), `empty`/`newline`/`room`, and 60+ others were equally
+    # exposed. A model offered "success" as a legal decl-identifier
+    # will sometimes pick it (`keep success as ...` / a param named
+    # `success`), which the REAL parser then rejects outright, because
+    # `success`/`failure`/`produce`/etc. are literal reserved tokens to
+    # it, not free identifiers -- i.e. this is a direct, mechanical
+    # cause of exactly the `FAIL@parse` results seen throughout Cell 13,
+    # not a rare edge case. Every word below is copied from grammar.py's
+    # own KEYWORDS set (verified via automated diff, not re-typed by
+    # hand) so this list is a snapshot, not a guess -- see the note at
+    # the bottom of this module on keeping the two in sync going
+    # forward, the same way architecture_test.py Test 2 already keeps
+    # grammar.py/parser.py's KEYWORDS in sync with each other.
+    "a", "all", "alone", "any", "assert", "at", "attempt", "bind", "bitwise",
+    "c", "const", "constructor", "cosine", "defer", "define", "destructor",
+    "difference", "each", "empty", "exponential", "export", "extends",
+    "extern", "failure", "fn", "for", "from", "handle", "holding", "import",
+    "in", "into", "item", "least", "left", "length", "method", "module",
+    "most", "move", "new", "newline", "no", "on", "override", "possibilities",
+    "power", "private", "produce", "product", "protected", "public", "put",
+    "quotient", "ref", "remainder", "repeating", "return", "right", "room",
+    "root", "shared", "shift", "sine", "square", "stop", "success", "sum",
+    "syscall", "taking", "tanh", "transmute", "unique", "use", "values",
+    "virtual", "weak",
 }
 
+# ---------------------------------------------------------------------
+# SYNC CHECK: keep this set from silently drifting behind grammar.py's
+# KEYWORDS again the way it just did (see the ROOT-CAUSE FIX note
+# above). Cheap, import-time, no I/O beyond the module already being
+# imported -- not a substitute for a real architecture_test.py case
+# (recommended: add a Test to that suite asserting
+# RESERVED_WORDS >= GrammarState... KEYWORDS the same way Test 2
+# already checks grammar.py against parser.py), but catches the drift
+# immediately in any environment that imports this module at all,
+# rather than waiting to be rediscovered via a Kaggle diagnostic run.
+# ---------------------------------------------------------------------
+def _check_reserved_words_sync():
+    try:
+        from .grammar import DictumGrammar as _Grammar
+    except ImportError:
+        try:
+            from grammar import DictumGrammar as _Grammar
+        except ImportError:
+            return  # grammar.py not importable standalone here -- skip silently
+    canonical = {w.lower() for w in getattr(_Grammar, "KEYWORDS", set())}
+    ours = {w.lower() for w in RESERVED_WORDS}
+    drift = canonical - ours
+    if drift:
+        import warnings
+        warnings.warn(
+            f"chunk_grammar.RESERVED_WORDS is missing {len(drift)} keyword(s) "
+            f"present in grammar.py's KEYWORDS: {sorted(drift)} -- these will "
+            f"leak into decl-identifier candidates until RESERVED_WORDS is "
+            f"updated to match.", RuntimeWarning, stacklevel=2)
+
+
+_check_reserved_words_sync()
+
 UNSAFE_NAMES = ("RAW_MALLOC", "RAW_FREE", "ATOMIC_FAA")
+
+# ---------------------------------------------------------------------
+# ROOT-CAUSE FIX (Cell 13, C1/C4/C8/V3 -- "redefinition of 'sqrt'",
+# "'remainder' redefinition", etc.): a plan item describing
+# `import from c the math function sqrt` (or ANY prose that names a
+# real libc symbol) makes that word appear in the chunk's own
+# extract_identifiers() output, same as any other word in the plan
+# text. Nothing before this fix ever excluded it from DECL-position
+# candidates (keep-name / param-name / field-name / the chunk's own
+# action name), so a model that has no legal grammar path to emit a
+# real `import from C ... as <alias>` statement (chunk_grammar.py has
+# never generated import-statement productions -- imports are
+# top-level/pre-use constructs, not something that belongs inside a
+# single OPERATION chunk's body grammar) falls back to the only thing
+# the grammar DOES let it do with that word: declare a same-named
+# local variable. emit_c.py unconditionally `#include <math.h>` in
+# every generated file (see emit_c.py's always-on include block), so
+# `int32_t sqrt = 0;` collides with libc's `extern double sqrt(double);`
+# the instant that chunk is compiled -- a real, deterministic, DECL-
+# position identifier leak, not a rare edge case.
+#
+# This is scoped to DECL positions only (see _decl_identifier_candidates
+# below), not to extract_identifiers()/RESERVED_WORDS generally: a real
+# `import from C the action sqrt takes ... as c_sqrt` legitimately
+# mentions "sqrt" in USE position (the real C symbol name), and that
+# must stay legal.
+LIBC_RESERVED_SYMBOLS = {
+    # <math.h> -- exactly the function family importc-math/PATTERN_MATCH
+    # already recognizes (sqrt/cos/sin/floor/ceil/fabs/exp/log), plus the
+    # neighbors observed colliding in practice (remainder, pow, ...) and
+    # the rest of that header's common single-word surface, so this
+    # doesn't need re-patching the next time a plan happens to name one.
+    "sqrt", "cos", "sin", "tan", "acos", "asin", "atan", "atan2",
+    "floor", "ceil", "round", "trunc", "fabs", "abs", "exp", "exp2",
+    "log", "log2", "log10", "pow", "fmod", "remainder", "hypot",
+    "cbrt", "sinh", "cosh", "tanh", "nan", "isnan", "isinf",
+    # <stdlib.h>/<string.h>/<stdio.h> one-word symbols a plan's prose can
+    # plausibly name the same way it names a math function (e.g. a
+    # future `import from c the action malloc ...`-style item) -- same
+    # decl-position collision risk, so reserved defensively.
+    "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memmove",
+    "strlen", "strcpy", "strcat", "strcmp", "printf", "scanf", "rand", "srand",
+}
 
 CMP_PHRASES = {
     "not equal to": '"not" " " "equal" " " "to"',
@@ -566,10 +677,13 @@ def _identifier_rule(candidates):
     return f'identifier    ::= {lits}'
 
 
-def _decl_identifier_candidates(idents, text):
+def _decl_identifier_candidates(idents, text, reserved_names=None):
     """Role-scoped candidate list for keep-stmt's DECLARED-name slot:
     every extracted identifier EXCEPT names already in scope as a
-    parameter (`takes X as T`) or the chunk's own action/program name.
+    parameter (`takes X as T`), the chunk's own action/program name,
+    a real libc/math.h symbol this chunk's prose happens to mention
+    (LIBC_RESERVED_SYMBOLS), or a name already declared by an EARLIER
+    chunk in this same build (reserved_names).
 
     Confirmed live (Cell 13, every IMPORT_C-style action and several
     plain ones -- `'X' redeclared as different kind of symbol`, `'Total'
@@ -583,14 +697,31 @@ def _decl_identifier_candidates(idents, text):
     fallback (a parameter name leaking into TYPE position); this is the
     same leak into a keep-stmt's own NAME position.
 
+    reserved_names (Cell 13 C9 -- "redefinition of 'Score'", a shape
+    declared by an EARLIER TYPE chunk reused as a local variable name by
+    a LATER OPERATION chunk): chunk_grammar.py is invoked fresh, per
+    chunk, with no memory of prior chunks -- generate()/main() previously
+    had zero way to know "Score" was already a shape typedef by the time
+    this chunk runs, because nothing upstream ever told it. Callers now
+    pass every shape/action/field name already emitted into the
+    accumulated source so far (see main()'s `reserved_names` payload
+    key), and those names are excluded here exactly like an in-chunk
+    param/own-name collision -- same bug class, just spanning chunks
+    instead of one chunk's own text.
+
     Falls back to the unfiltered candidate list only if every known name
-    is already a parameter/own-name -- no other option would exist
-    either, and _decl_identifier_rule further falls back to an open
-    identifier class in that case rather than reintroducing the bug."""
+    is excluded -- no other option would exist either, and
+    _decl_identifier_rule further falls back to an open identifier class
+    in that case rather than reintroducing the bug."""
     param_names = _extract_param_names(text)
     own_name = _extract_own_name(text)
-    exclude = param_names | ({own_name} if own_name else set())
-    filtered = [c for c in idents if c not in exclude]
+    exclude = {w.lower() for w in param_names}
+    if own_name:
+        exclude.add(own_name.lower())
+    exclude |= LIBC_RESERVED_SYMBOLS
+    if reserved_names:
+        exclude |= {str(n).lower() for n in reserved_names}
+    filtered = [c for c in idents if c.lower() not in exclude]
     return filtered
 
 
@@ -875,13 +1006,21 @@ def _validate_rule_names(gbnf_text):
 
 def generate(chunk):
     """chunk: {"tierName": str, "items": [{"category","id","desc"}, ...],
-    "unsafe": bool}. Returns GBNF text, or raises ValueError if the chunk
-    has no items (nothing to scope a grammar to)."""
+    "unsafe": bool, "reserved_names": [str, ...] (optional)}. Returns
+    GBNF text, or raises ValueError if the chunk has no items (nothing
+    to scope a grammar to).
+
+    reserved_names: shape/action/field names already emitted into the
+    accumulated source by EARLIER chunks in this same build (see
+    _decl_identifier_candidates). Optional and additive -- omitting it
+    reproduces the previous (narrower, in-chunk-only) exclusion
+    behavior, it never makes the grammar MORE permissive than before."""
     items = chunk.get("items") or []
     if not items:
         raise ValueError("chunk has no items")
     tier = (chunk.get("tierName") or "OTHER").upper()
     unsafe = bool(chunk.get("unsafe"))
+    reserved_names = chunk.get("reserved_names") or []
     text = _all_desc(items)
 
     idents = extract_identifiers(items)
@@ -1138,7 +1277,7 @@ def generate(chunk):
         else:
             used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
             parts.append(_stmt_rule(stmt_kinds, body_allow_all,
-                                     decl_candidates=_decl_identifier_candidates(idents, text)))
+                                     decl_candidates=_decl_identifier_candidates(idents, text, reserved_names)))
             parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:

@@ -13,9 +13,35 @@
 // property.
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateChunkGrammar = generateChunkGrammar;
+exports.extractReservedNames = extractReservedNames;
 
 const { spawn } = require("child_process");
 const path = require("path");
+
+/**
+ * Pulls every shape/action/field name already committed to the
+ * accumulated source (i.e. every EARLIER chunk's output) so the NEXT
+ * chunk's grammar can be told "don't re-declare these" -- see
+ * generateChunkGrammar's reservedNames param. Regex-based on purpose,
+ * same tradeoff graph.js's own lightweight symbol tracking already
+ * makes for this file: exact AST-level extraction would need a full
+ * parse of source that might currently be mid-chunk/invalid, and this
+ * only needs to be a safe, additive OVER-approximation (reserving a
+ * name that wasn't really a declaration just makes one specific decl
+ * pick unavailable in a rare case -- generate() always has an open-
+ * identifier-class fallback if that empties the candidate list; it
+ * never breaks a build outright).
+ */
+function extractReservedNames(accumulatedSource) {
+    const src = accumulatedSource || "";
+    const names = new Set();
+    for (const m of src.matchAll(/^\s*shape\s+(\w+)/gm)) names.add(m[1]);
+    for (const m of src.matchAll(/^\s*action\s+(\w+)/gm)) names.add(m[1]);
+    // field names: lines inside a `shape ... holds ... end shape` block,
+    // of the form `<name> as <type>` at one level of indent.
+    for (const m of src.matchAll(/^\s+(\w+)\s+as\s+/gm)) names.add(m[1]);
+    return Array.from(names);
+}
 
 /**
  * Returns the generated GBNF text for one chunk, or null if generation
@@ -29,8 +55,18 @@ const path = require("path");
  * chunk: { tierName, items: [{category, id, desc}, ...] }
  * unsafe: whether this chunk may need unsafe-block/unsafe-token support
  *         (mirrors the needsUnsafe check _runBuild already does today).
+ * reservedNames: shape/action/field names already emitted into the
+ *         accumulated source by EARLIER chunks in this build (see
+ *         extractReservedNames below). Optional -- omitting it is
+ *         identical to the previous behavior; it only ever narrows the
+ *         grammar's decl-position candidates further, never widens it.
+ *         Fixes the cross-chunk collision class ("redefinition of
+ *         'Score'" -- a shape name reused as a later chunk's local
+ *         variable) that a per-chunk-only grammar call can't see on
+ *         its own, since chunk_grammar.py is spawned fresh per chunk
+ *         with no memory of prior chunks.
  */
-function generateChunkGrammar(ext, pythonPath, chunk, unsafe, timeoutMs = 5000) {
+function generateChunkGrammar(ext, pythonPath, chunk, unsafe, reservedNames = [], timeoutMs = 5000) {
     return new Promise((resolve) => {
         let script;
         try {
@@ -44,6 +80,7 @@ function generateChunkGrammar(ext, pythonPath, chunk, unsafe, timeoutMs = 5000) 
             tierName: chunk.tierName,
             items: (chunk.items || []).map((it) => ({ category: it.category, id: it.id, desc: it.desc })),
             unsafe: !!unsafe,
+            reserved_names: Array.isArray(reservedNames) ? reservedNames : [],
         });
         let proc;
         try {

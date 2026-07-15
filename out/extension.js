@@ -784,7 +784,15 @@ async function _runBuild(ext) {
             // generates exactly like it did before per-chunk grammar existed.
             let chunkGrammar = staticGrammar;
             if (effectiveMode === 'gbnf' && staticGrammar) {
-                const generated = await (0, chunkGrammar_1.generateChunkGrammar)(ext, cfg.pythonPath, chunk, needsUnsafe);
+                // Fixes the cross-chunk collision class ("redefinition of
+                // 'Score'" -- an earlier chunk's shape/action/field name
+                // reused as a later chunk's local variable, since each
+                // chunk's grammar used to be generated with zero memory
+                // of prior chunks). `accumulated` already holds every
+                // earlier chunk's committed output at this point in the
+                // loop -- see chunkGrammar.js's extractReservedNames.
+                const reservedNames = (0, chunkGrammar_1.extractReservedNames)(accumulated);
+                const generated = await (0, chunkGrammar_1.generateChunkGrammar)(ext, cfg.pythonPath, chunk, needsUnsafe, reservedNames);
                 if (generated) {
                     chunkGrammar = generated;
                 }
