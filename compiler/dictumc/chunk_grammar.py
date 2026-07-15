@@ -566,6 +566,49 @@ def _identifier_rule(candidates):
     return f'identifier    ::= {lits}'
 
 
+def _decl_identifier_candidates(idents, text):
+    """Role-scoped candidate list for keep-stmt's DECLARED-name slot:
+    every extracted identifier EXCEPT names already in scope as a
+    parameter (`takes X as T`) or the chunk's own action/program name.
+
+    Confirmed live (Cell 13, every IMPORT_C-style action and several
+    plain ones -- `'X' redeclared as different kind of symbol`, `'Total'
+    redefinition`, etc.): keep-stmt's declared-name slot used to draw
+    from the exact same unfiltered `identifier` rule as every reference
+    position, so a grammar-constrained model satisfying `keep <name> as
+    <type> with value <n>` was free to pick a name that's ALREADY a
+    parameter of the very action it's inside -- legal GBNF, illegal C
+    (redeclaration) the moment it's emitted. This is the same class of
+    bug _dtype_identifier_candidates already fixed for the dtype
+    fallback (a parameter name leaking into TYPE position); this is the
+    same leak into a keep-stmt's own NAME position.
+
+    Falls back to the unfiltered candidate list only if every known name
+    is already a parameter/own-name -- no other option would exist
+    either, and _decl_identifier_rule further falls back to an open
+    identifier class in that case rather than reintroducing the bug."""
+    param_names = _extract_param_names(text)
+    own_name = _extract_own_name(text)
+    exclude = param_names | ({own_name} if own_name else set())
+    filtered = [c for c in idents if c not in exclude]
+    return filtered
+
+
+def _decl_identifier_rule(candidates):
+    """Same shape as _identifier_rule, but a separate rule NAME
+    (decl-identifier) so keep-stmt's declared-name slot can be
+    role-scoped independently of the general reference `identifier`
+    rule -- see _decl_identifier_candidates. If candidates is empty
+    (every extracted name is already a parameter/own-name), fall back to
+    the open identifier class rather than to the unfiltered list --
+    falling back to the unfiltered list would silently reopen the exact
+    redeclaration bug this rule exists to close."""
+    if not candidates:
+        return 'decl-identifier ::= [a-zA-Z_] [a-zA-Z0-9_]*'
+    lits = " | ".join(f'"{c}"' for c in candidates)
+    return f'decl-identifier ::= {lits}'
+
+
 def _cmp_op_rule(found):
     if not found:
         # Full set -- see module docstring: under-detection must never
@@ -755,7 +798,7 @@ _UNARY = (
 )
 
 
-def _stmt_rule(kinds, allow_all):
+def _stmt_rule(kinds, allow_all, decl_candidates=None):
     """simple-stmt alternation, narrowed to only the kinds actually
     detected -- ONLY used for tiers where per-item granularity is fine
     enough to trust (TYPE, MEMORY, SAFETY). See module docstring for why
@@ -767,11 +810,21 @@ def _stmt_rule(kinds, allow_all):
     keep-stmt's "as"/"with value" positions route through as-kw
     (emitted centrally in generate(), alongside dtype -- field-decl and
     param reference the same rule so all three stay in sync) and
-    with-value-kw (emitted here, since it's keep-stmt-only)."""
+    with-value-kw (emitted here, since it's keep-stmt-only).
+
+    BUGFIX (Cell 13): keep-stmt's declared-name slot used to reuse the
+    general `identifier` rule -- the SAME candidate list offered at
+    every reference position, including the action's own parameters.
+    That let a grammar-constrained model satisfy `keep <name> as <type>
+    with value <n>` by picking a name that's already a parameter,
+    producing a C redeclaration error every time (confirmed live across
+    nearly every Cell 13 test, not just IMPORT_C ones). keep-stmt's name
+    slot now routes through its own role-scoped `decl-identifier` rule
+    (see _decl_identifier_candidates/_decl_identifier_rule) instead."""
     print_and_tail = _bounded_repeat('" " "and" " " print-arg', _CHAIN_CAP, 0)
     call_and_tail = _bounded_repeat('" " "and" " " expr', _CHAIN_CAP, 0)
     all_kinds = {
-        "keep": 'keep-stmt     ::= keep-kw " " identifier " " as-kw " " dtype (" " with-value-kw " " expr)?',
+        "keep": 'keep-stmt     ::= keep-kw " " decl-identifier " " as-kw " " dtype (" " with-value-kw " " expr)?',
         "set": 'set-stmt      ::= set-kw " " identifier " " "to" " " expr',
         "print": f'print-stmt    ::= print-kw " " "the" " " "text" " " print-arg {print_and_tail}',
         "call": f'call-stmt     ::= call-kw " " identifier (" " "with" " " expr {call_and_tail})? (" " "giving" " " identifier)?',
@@ -786,6 +839,7 @@ def _stmt_rule(kinds, allow_all):
             lines.append(f"{k}-kw".ljust(14) + f"::= {_kw_alt_gbnf(k)}")
     if "keep" in use:
         lines.append("with-value-kw ::= " + _connector_alt_gbnf("with_value"))
+        lines.append(_decl_identifier_rule(decl_candidates or []))
     return "\n".join(lines)
 
 
@@ -1083,7 +1137,8 @@ def generate(chunk):
             used_stmt_kinds = set()
         else:
             used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
-            parts.append(_stmt_rule(stmt_kinds, body_allow_all))
+            parts.append(_stmt_rule(stmt_kinds, body_allow_all,
+                                     decl_candidates=_decl_identifier_candidates(idents, text)))
             parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
