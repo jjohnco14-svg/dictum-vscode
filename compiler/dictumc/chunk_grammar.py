@@ -430,12 +430,29 @@ def extract_identifiers(items):
     name' -- both are legal `identifier` uses in Dictum, and the grammar
     doesn't distinguish them positionally either)."""
     text = _all_desc(items)
+
+    # A word immediately followed by "as"/"of type" is unambiguously
+    # being used in a NAME position (field-decl/param/keep-name) --
+    # this holds even when that same word is ALSO listed in
+    # RESERVED_WORDS as a dtype synonym (e.g. "count", which is both a
+    # perfectly normal field name and an alternate spelling for a
+    # numeric type). Re-admitting it here is purely ADDITIVE -- it
+    # never removes an existing candidate -- so it can't reproduce the
+    # self-declaration regression an earlier (reverted) attempt hit by
+    # SUBTRACTING a chunk's own type name from this same pool.
+    name_position = set()
+    for phrase in CONNECTOR_SYNONYMS["as"]:
+        pat = r"\b([A-Za-z_][A-Za-z0-9_]*)\s+" + r"\s+".join(re.escape(w) for w in phrase) + r"\b"
+        name_position |= {m.group(1) for m in re.finditer(pat, text, re.I)}
+
     found = []
     seen = set()
     for m in IDENT_RE.finditer(text):
         w = m.group(0)
         lw = w.lower()
-        if lw in RESERVED_WORDS or lw in seen:
+        if lw in seen:
+            continue
+        if lw in RESERVED_WORDS and w not in name_position:
             continue
         if lw in ("raw_malloc", "raw_free", "atomic_faa"):
             continue

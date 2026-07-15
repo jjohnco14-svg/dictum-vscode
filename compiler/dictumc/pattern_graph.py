@@ -317,27 +317,75 @@ try:
 except ImportError:  # pragma: no cover -- allows `python3 pattern_graph.py` standalone
     import chunk_grammar as _cg
 
+def _kw_alt_re(name):
+    """Regex alternation for a KEYWORD_SYNONYMS entry, e.g. produces
+    'keep|declare|make' for name='keep'. Derived from chunk_grammar's
+    own table so this can never independently drift from what the
+    GBNF/model path actually accepts -- same rationale as
+    _canonical_dtype reusing DTYPE_PHRASES."""
+    return "|".join(re.escape(w) for w in _cg.KEYWORD_SYNONYMS[name])
+
+
+def _connector_alt_re(name):
+    """Regex alternation for a CONNECTOR_SYNONYMS entry, e.g. produces
+    'as|of\\s+type' for name='as'."""
+    return "|".join(r"\s+".join(re.escape(w) for w in phrase) for phrase in _cg.CONNECTOR_SYNONYMS[name])
+
+
+# Words that can start the with-value connector ("with value", "initialized
+# to", "starting at") -- used to stop the dtype capture in "keep" before it
+# swallows into that clause (mirrors the old hardcoded `(?!\bwith\b)`, now
+# generalized to every registered with-value synonym).
+_WITH_VALUE_STOP_RE = "|".join(re.escape(p[0]) for p in _cg.CONNECTOR_SYNONYMS["with_value"])
+
 _VALUE_RE = r'(?:"[^"\n]*"|-?\d+(?:\.\d+)?|[A-Za-z_]\w*)'
 _LEFTOVER_OK_RE = re.compile(r'^[\s.,:]*(?:\b(?:and|then)\b[\s.,:]*)*$', re.I)
 
+# Exact descriptor phrases print's "the <descriptor> <value>" form can use
+# ("the text", "the number", "the whole number", ...) -- built from the
+# real dtype phrase list (longest first, so "whole number" is tried before
+# a hypothetical shorter overlapping phrase) rather than a generic
+# `[a-zA-Z]+ [a-zA-Z]+` wildcard. The wildcard version was ambiguous: for
+# "print the text Hello and newline" it couldn't tell where the descriptor
+# phrase ended and the actual value began, since both are just words, and
+# it silently over-consumed "Hello" as a second descriptor word, leaving
+# "and newline" as unparsed leftover.
+_PRINT_DESC_EXTRA = ["number"]  # informal shorthand for "whole/fractional/decimal number"
+_PRINT_DESC_PHRASES = sorted(
+    {name for name, _lit in _cg.DTYPE_PHRASES + _cg.RETURN_ONLY_DTYPE_PHRASES} | set(_PRINT_DESC_EXTRA),
+    key=lambda n: -len(n.split()),
+)
+_PRINT_DESC_ALT_RE = "|".join(r"\s+".join(re.escape(w) for w in name.split()) for name in _PRINT_DESC_PHRASES)
+
 _SEQ_CLAUSE_PATTERNS = {
     "keep": re.compile(
-        r'\bkeeps?\b\s+(?P<name>[A-Za-z_]\w*)\s+as\s+'
-        r'(?P<dtype>(?:(?!\bwith\b)[a-zA-Z]+)(?:\s+(?!\bwith\b)[a-zA-Z]+)?)'
-        r'(?:\s+with\s+value\s+(?P<value>' + _VALUE_RE + r'))?',
+        r'\b(?:' + _kw_alt_re("keep") + r')\b\s+(?P<name>[A-Za-z_]\w*)\s+(?:' + _connector_alt_re("as") + r')\s+'
+        r'(?P<dtype>(?:(?!\b(?:' + _WITH_VALUE_STOP_RE + r')\b)[a-zA-Z]+)'
+        r'(?:\s+(?!\b(?:' + _WITH_VALUE_STOP_RE + r')\b)[a-zA-Z]+)?)'
+        r'(?:\s+(?:' + _connector_alt_re("with_value") + r')\s+(?P<value>' + _VALUE_RE + r'))?',
         re.I,
     ),
     "set": re.compile(
-        r'\bsets?\b\s+(?P<name>[A-Za-z_]\w*)\s+to\s+(?P<value>' + _VALUE_RE + r')',
+        r'\b(?:' + _kw_alt_re("set") + r')\b\s+(?P<name>[A-Za-z_]\w*)\s+to\s+(?P<value>' + _VALUE_RE + r')',
         re.I,
     ),
     "print": re.compile(
-        r'\bprints?\b\s+(?:the\s+[a-zA-Z]+(?:\s+[a-zA-Z]+)?\s+)?(?P<value>' + _VALUE_RE + r')',
+        r'\b(?:' + _kw_alt_re("print") + r')\b\s+(?:the\s+(?:' + _PRINT_DESC_ALT_RE + r')\s+)?'
+        # Capture the FULL "and"-joined chain of print-args (e.g. "Hello
+        # and newline"), not just the first one -- print-stmt's own
+        # grammar allows up to 5 "and"-joined args (see chunk_grammar's
+        # print_and_tail), and "newline" is just an ordinary second
+        # print-arg (parser.py treats the bare word `newline` as the
+        # literal '\n'), not special trailing syntax. Capturing only one
+        # value here left "and newline" as unrecognized leftover and
+        # bailed the whole expansion for the extremely common
+        # "print the text X and newline" idiom.
+        r'(?P<value>' + _VALUE_RE + r'(?:\s+and\s+' + _VALUE_RE + r'){0,4})',
         re.I,
     ),
-    "release": re.compile(r'\breleases?\b\s+(?P<name>[A-Za-z_]\w*)', re.I),
+    "release": re.compile(r'\b(?:' + _kw_alt_re("release") + r')\b\s+(?P<name>[A-Za-z_]\w*)', re.I),
     "call": re.compile(
-        r'\bcalls?\b\s+(?P<name>[A-Za-z_]\w*)'
+        r'\b(?:' + _kw_alt_re("call") + r')\b\s+(?P<name>[A-Za-z_]\w*)'
         r'(?:\s+with\s+(?P<arg>' + _VALUE_RE + r'))?'
         r'(?:\s+giving\s+(?P<out>[A-Za-z_]\w*))?',
         re.I,
@@ -378,11 +426,16 @@ def _plain_forced_return_dtype(text):
     return None
 
 
-def _render_seq_clause(kind, m):
+def _render_seq_clause(kind, m, declared_names=None):
     """Turns one matched clause back into canonical Dictum surface
     syntax. Returns None if a required sub-field failed to resolve
     (e.g. an unrecognized dtype phrase) -- caller treats that exactly
-    like a non-match: bail the whole expansion."""
+    like a non-match: bail the whole expansion. `declared_names` is the
+    set of names actually keep/param-declared so far in this chunk --
+    only used by "print", to disambiguate a bare word that's a real
+    variable reference (in declared_names) from a bare word that's
+    really a string literal the plan just didn't quote (e.g. "print
+    the text Hello" where Hello was never declared anywhere)."""
     if kind == "keep":
         dtype = _canonical_dtype(m.group("dtype"))
         if dtype is None:
@@ -401,7 +454,22 @@ def _render_seq_clause(kind, m):
     if kind == "set":
         return f'set {m.group("name")} to {m.group("value")}'
     if kind == "print":
-        return f'print the text {m.group("value")}'
+        declared = declared_names or set()
+        literal_words = {"true", "false", "nothing", "newline"}
+        parts = re.split(r'(\s+and\s+)', m.group("value"))
+        for i, tok in enumerate(parts):
+            if i % 2 == 1:  # the " and " separators themselves
+                continue
+            if tok.startswith('"') or re.match(r'^-?\d', tok):
+                continue  # already a quoted string or a number literal
+            if tok.lower() in literal_words:
+                continue  # true/false/nothing/newline are real keywords
+            if tok not in declared:
+                # A bare word that was never keep/param-declared anywhere
+                # in this chunk can't be a real variable reference -- the
+                # plan just didn't quote its string literal.
+                parts[i] = f'"{tok}"'
+        return f'print the text {"".join(parts)}'
     if kind == "release":
         return f'release {m.group("name")}'
     if kind == "call":
@@ -450,8 +518,13 @@ def try_sequential_expand(chunk):
     # action literally named "update", which STMT_TRIGGERS also treats
     # as a "set" synonym) spuriously self-triggers on its own header
     # and corrupts the trigger ordering below.
-    header_m = re.search(r"\b(?:program|shape|action)\s+[A-Za-z_][A-Za-z0-9_]*", text, re.I)
+    header_m = re.search(r"\b(program|shape|action)\s+[A-Za-z_][A-Za-z0-9_]*", text, re.I)
+    decl_kind = header_m.group(1).lower() if header_m else "action"
     body_text = text[header_m.end():] if header_m else text
+    if decl_kind == "shape":
+        # A shape has no statement body to sequence at all (only field
+        # declarations) -- out of scope for this expander.
+        return None
 
     triggers = []
     for kind, pat in _cg.STMT_TRIGGERS.items():
@@ -462,6 +535,7 @@ def try_sequential_expand(chunk):
     triggers.sort(key=lambda t: t[0])
 
     lines = []
+    declared_names = set()
     for i, (start, kind) in enumerate(triggers):
         end = triggers[i + 1][0] if i + 1 < len(triggers) else len(body_text)
         segment = body_text[start:end]
@@ -471,12 +545,16 @@ def try_sequential_expand(chunk):
         leftover = segment[m.end():]
         if not _LEFTOVER_OK_RE.match(leftover):
             return None
-        line = _render_seq_clause(kind, m)
+        line = _render_seq_clause(kind, m, declared_names)
         if line is None:
             return None
         lines.append(line)
+        if kind == "keep":
+            declared_names.add(m.group("name"))
 
     body = "\n".join(f"    {ln}" for ln in lines)
+    if decl_kind == "program":
+        return f"program {action_name}:\n{body}\nend program"
     return f"action {action_name} produces {return_dtype}:\n{body}\nend action"
 
 
