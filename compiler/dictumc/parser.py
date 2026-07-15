@@ -1224,17 +1224,29 @@ class Parser:
                 self.consume_newlines()
                 if self.cur().type == TokenType.INDENT:
                     self.advance()
-            while not (self.cur().type == TokenType.WORD and
-                       self.cur().value in ('produces', 'end')):
-                self.consume_newlines()
-                if self.cur().type in (TokenType.DEDENT, TokenType.EOF): break
-                if self.cur().type == TokenType.WORD and self.cur().value in ('produces','end'): break
-                pname = self.expect_word().value
-                self.expect_word('as')
-                ptype = self.parse_type()
-                params.append((pname, ptype))
-                self.consume_newlines()
-                self.match_word('and') or self.match_word(',')
+            # BUGFIX: `takes nothing` is the explicit zero-params marker
+            # (same convention already honored by parse_import_c/
+            # parse_import_cpp), not a param whose name happens to be
+            # "nothing". Without this check the loop below would try to
+            # parse 'nothing' as a param name and then `expect_word('as')`
+            # against whatever follows it (usually 'produces'), which is
+            # exactly the "plan calls for 'as', but the generated code has
+            # 'produces'" failure -- and it fires on ANY hand-written
+            # `takes nothing` action/method, not just AI-generated code.
+            if self.cur().type == TokenType.WORD and self.cur().value == 'nothing':
+                self.advance()
+            else:
+                while not (self.cur().type == TokenType.WORD and
+                           self.cur().value in ('produces', 'end')):
+                    self.consume_newlines()
+                    if self.cur().type in (TokenType.DEDENT, TokenType.EOF): break
+                    if self.cur().type == TokenType.WORD and self.cur().value in ('produces','end'): break
+                    pname = self.expect_word().value
+                    self.expect_word('as')
+                    ptype = self.parse_type()
+                    params.append((pname, ptype))
+                    self.consume_newlines()
+                    self.match_word('and') or self.match_word(',')
             if self.cur().type == TokenType.DEDENT:
                 self.advance()
         return params
@@ -1302,23 +1314,34 @@ class Parser:
             if self.cur().type in (TokenType.INDENT, TokenType.NEWLINE):
                 self.consume_newlines()
                 if self.cur().type == TokenType.INDENT: self.advance()
-            while not (self.cur().type == TokenType.WORD and
-                       self.cur().value in ('produces', 'end')):
-                self.consume_newlines()
-                if self.cur().type in (TokenType.DEDENT, TokenType.EOF): break
-                if self.cur().type == TokenType.WORD and self.cur().value in ('produces','end'): break
-                pname = self.expect_word().value
-                self.expect_word('as')
-                if self.match_word('any'):
-                    constraint = self.parse_type()
-                    params.append((pname, constraint))
-                    if constraint not in [t[0] for t in template_params]:
-                        template_params.append((constraint, constraint))
-                else:
-                    ptype = self.parse_type()
-                    params.append((pname, ptype))
-                self.consume_newlines()
-                self.match_word('and') or self.match_word(',')
+            # BUGFIX: `takes nothing` is the explicit zero-params marker
+            # (mirrors the same fix in _parse_params / parse_import_c /
+            # parse_import_cpp) -- without it, 'nothing' gets consumed as
+            # a param NAME below and the following `expect_word('as')`
+            # then fails against 'produces', which is the exact "plan
+            # calls for 'as', but the generated code has 'produces'"
+            # class of failure (and breaks hand-written `takes nothing`
+            # actions too, not just AI-generated ones).
+            if self.cur().type == TokenType.WORD and self.cur().value == 'nothing':
+                self.advance()
+            else:
+                while not (self.cur().type == TokenType.WORD and
+                           self.cur().value in ('produces', 'end')):
+                    self.consume_newlines()
+                    if self.cur().type in (TokenType.DEDENT, TokenType.EOF): break
+                    if self.cur().type == TokenType.WORD and self.cur().value in ('produces','end'): break
+                    pname = self.expect_word().value
+                    self.expect_word('as')
+                    if self.match_word('any'):
+                        constraint = self.parse_type()
+                        params.append((pname, constraint))
+                        if constraint not in [t[0] for t in template_params]:
+                            template_params.append((constraint, constraint))
+                    else:
+                        ptype = self.parse_type()
+                        params.append((pname, ptype))
+                    self.consume_newlines()
+                    self.match_word('and') or self.match_word(',')
             if self.cur().type == TokenType.DEDENT: self.advance()
         self.expect_word('produces')
         ret_type = self.parse_type()

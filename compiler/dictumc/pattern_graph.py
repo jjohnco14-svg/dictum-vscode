@@ -219,7 +219,7 @@ def bind_pattern(pattern_ref, params=None):
 # thing this codebase already does at Build time elsewhere (see
 # chunk_grammar.py's _detect_forced_return_dtype).
 # ---------------------------------------------------------------------
-_DETERMINISTIC_REFS = frozenset({"atomic-increment", "unsafe-malloc"})
+_DETERMINISTIC_REFS = frozenset({"atomic-increment", "unsafe-malloc", "while-loop"})
 
 _ACTION_NAME_RE = re.compile(r"\baction\s+([A-Za-z_]\w*)", re.I)
 # Tolerant of whatever separator the plan prose uses between the token
@@ -228,6 +228,36 @@ _ACTION_NAME_RE = re.compile(r"\baction\s+([A-Za-z_]\w*)", re.I)
 # literal space, since plan text isn't guaranteed to be single-spaced.
 _ATOMIC_FAA_RE = re.compile(r"\bATOMIC_FAA\b\D*?([A-Za-z_]\w*)\D+?(-?\d+)", re.I)
 _RAW_MALLOC_RE = re.compile(r"\bRAW_MALLOC\b\D*?(-?\d+)\D+?([A-Za-z_]\w*)", re.I)
+
+# while-loop is genuine prose (unlike the ATOMIC_FAA/RAW_MALLOC markers
+# above, there's no fixed token to anchor on), so this is several
+# candidate phrasings tried in order rather than one regex -- a miss on
+# all of them is a normal, expected outcome (falls back to the model,
+# same as always) for plan text this pass doesn't recognize the shape
+# of. Only fires when it can bind every one of var/init/threshold with
+# reasonable confidence; never guesses a value it didn't find.
+_WHILE_VAR_RES = [
+    re.compile(r"\b(?:counter|loop)\s+(?:variable|var)\s+(?:named|called)?\s*([A-Za-z_]\w*)", re.I),
+    re.compile(r"\bvariable\s+(?:named|called)\s+([A-Za-z_]\w*)", re.I),
+    re.compile(r"\bkeep\s+([A-Za-z_]\w*)\s+as\b", re.I),
+]
+_WHILE_INIT_RES = [
+    re.compile(r"\b(?:starting|start)(?:s|ing)?\s+at\s+(-?\d+)", re.I),
+    re.compile(r"\b(?:with\s+value|initiali[sz]ed\s+to|from)\s+(-?\d+)", re.I),
+    re.compile(r"\bcounts?\s+down\s+from\s+(-?\d+)", re.I),
+]
+_WHILE_THRESHOLD_RES = [
+    re.compile(r"\bgreater\s+than\s+(-?\d+)", re.I),
+    re.compile(r"\b(?:down\s+to|until\s+it\s+reaches|reaches)\s+(-?\d+)", re.I),
+]
+
+
+def _first_match(regexes, text):
+    for rx in regexes:
+        m = rx.search(text)
+        if m:
+            return m.group(1)
+    return None
 
 
 def extract_deterministic_params(pattern_ref, text):
@@ -256,6 +286,14 @@ def extract_deterministic_params(pattern_ref, text):
         if not m:
             return None
         return {"action_name": action_name, "size": m.group(1), "buffer": m.group(2)}
+
+    if pattern_ref == "while-loop":
+        var = _first_match(_WHILE_VAR_RES, text)
+        init_value = _first_match(_WHILE_INIT_RES, text)
+        threshold = _first_match(_WHILE_THRESHOLD_RES, text)
+        if not (var and init_value is not None and threshold is not None):
+            return None
+        return {"action_name": action_name, "var": var, "init_value": init_value, "threshold": threshold}
 
     return None  # unreachable given the _DETERMINISTIC_REFS check above
 

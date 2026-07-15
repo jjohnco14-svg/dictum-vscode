@@ -870,13 +870,15 @@ def generate(chunk):
     parts.append(f"# chunk_grammar.py auto-generated -- tier={tier}, items={[it.get('id') for it in items]}")
     parts.append(f"# Do not hand-edit; regenerate from the plan chunk instead.")
     parts.append("")
-    if len(items) > 1:
-        extra_decls = _bounded_repeat('"\\n" top-decl', len(items) - 1, len(items) - 1)
-        parts.append(f'root          ::= top-decl {extra_decls} "\\n"?')
+    n_items = len(items)
+    multi_item = n_items > 1
+    if multi_item:
+        root_seq = " ".join(f'top-decl-{i} "\\n"' for i in range(n_items - 1))
+        parts.append(f'root          ::= {root_seq} top-decl-{n_items - 1} "\\n"?')
     else:
         parts.append('root          ::= top-decl "\\n"?')
-    top_alt = " | ".join(f"{k}-decl" for k in allowed_top)
-    parts.append(f"top-decl      ::= {top_alt}")
+        top_alt = " | ".join(f"{k}-decl" for k in allowed_top)
+        parts.append(f"top-decl      ::= {top_alt}")
     parts.append("")
 
     # Only include a control-flow form when either (a) this tier's
@@ -916,61 +918,123 @@ def generate(chunk):
     if unsafe:
         stmt1_alts.append("unsafe-block")
 
-    if "program" in allowed_top:
-        parts.append('program-decl  ::= "program" " " identifier ":"? "\\n" body1 "end" " " "program"')
-    if "shape" in allowed_top:
-        n_fields = _count_shape_fields(text)
-        shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
-        parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
-        parts.append(f'shape-body    ::= {shape_body_gbnf}')
-        parts.append('field-decl    ::= identifier " " as-kw " " dtype')
     forced_return = None
-    if "action" in allowed_top:
-        # BUGFIX (Tier6/7): the "takes" clause used to always be offered
-        # as optional, even when the plan text never mentions parameters
-        # at all -- giving the model room to invent a takes-clause out of
-        # thin air (and, since the same unrestricted `identifier` rule
-        # was used for the new param name, reuse the action's OWN name
-        # as that param, as seen in Tier6's
-        # `takes ... and unsafe_demo as raw pointer to count`). Only
-        # offer the clause at all when the plan text has a "takes" (or an
-        # explicit "as"-typed parameter list) to justify it.
-        # BUGFIX (Tier6/7): the "takes" clause used to always be offered
-        # as optional, even when the plan text never mentions parameters
-        # at all -- giving the model room to invent a takes-clause out of
-        # thin air (and, since the same unrestricted `identifier` rule
-        # was used for the new param name, reuse the action's OWN name
-        # as that param, as seen in Tier6's
-        # `takes ... and unsafe_demo as raw pointer to count`). Only
-        # offer the clause at all when the plan text has a "takes" (or an
-        # explicit "as"-typed parameter list) to justify it.
-        #
-        # BUGFIX (P1_RoleScoped_Call): the naive `\btakes\b` check also
-        # fired on the literal phrase "takes nothing" -- which parser.py
-        # already treats as explicit zero-params syntax, not a param
-        # list -- and routed it into the SAME parameterized grammar
-        # below, whose `params` rule structurally requires at least one
-        # real parameter (see n_params = max(1, ...)). That left the
-        # model no way to satisfy the grammar without inventing a fake
-        # parameter for every action whose plan says "takes nothing",
-        # which is exactly what produced `takes Item as Item` (reusing
-        # the shape's own type name) and the resulting dangling
-        # reference to a field name that was never actually a param.
-        forced_takes_nothing = bool(re.search(r"\btakes\s+nothing\b", text, re.I))
-        has_takes_clause = (not forced_takes_nothing) and bool(re.search(r"\btakes\b", text, re.I))
-        forced_return = _detect_forced_return_dtype(text)
-        return_ref = forced_return if forced_return else "return-dtype"
-        if has_takes_clause:
-            parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " params " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
-            n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
-            params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
-            parts.append(f'params        ::= param {params_gbnf}'.rstrip())
+    needs_shared_return_dtype = False
+
+    if multi_item:
+        # ROBUSTNESS FIX (class of bug behind P1_RoleScoped_Call): a
+        # chunk bundling several top-level declarations (e.g. one shape
+        # plus two actions with DIFFERENT takes/produces signatures)
+        # used to share ONE action-decl/shape-decl production across
+        # every item in the root sequence. That single production's
+        # header shape (has a takes-clause or not, forced return dtype
+        # or not, field count) was derived from the WHOLE chunk's
+        # concatenated text, so it could only match ONE of the items'
+        # actual shapes -- every other item in the sequence had no
+        # grammar-legal way to match its own plan line, and the model
+        # substituted whatever the shared production actually allowed
+        # (observed live: plan says "as", generated code has
+        # "produces"). Fix: scope each top-level declaration's header
+        # to that ONE item's own description text, with its own
+        # numbered production, so heterogeneous items no longer fight
+        # over a single shared rule. Body machinery (body1/stmt1/expr/
+        # dtype) stays shared -- it's generic per-statement machinery,
+        # not per-declaration, so there's no equivalent ambiguity there.
+        any_shape = False
+        any_action_with_params = False
+        for i, item in enumerate(items):
+            item_text = item.get("desc") or ""
+            item_has_shape = bool(re.search(r"\bshape\s+\w+\s+holds\b", item_text, re.I))
+            item_has_program = bool(re.search(r"\bprogram\s+\w+\b", item_text, re.I))
+            item_has_action = bool(re.search(r"\baction\s+\w+\b", item_text, re.I))
+            cats_i = [k for k, v in (("program", item_has_program), ("shape", item_has_shape), ("action", item_has_action)) if v]
+            cats_i = [k for k in cats_i if k in allowed_top] or list(allowed_top)
+
+            top_alt_i = " | ".join(f"{k}-decl-{i}" for k in cats_i)
+            parts.append(f"top-decl-{i}  ::= {top_alt_i}")
+
+            if "program" in cats_i:
+                parts.append(f'program-decl-{i} ::= "program" " " identifier ":"? "\\n" body1 "end" " " "program"')
+            if "shape" in cats_i:
+                any_shape = True
+                n_fields_i = _count_shape_fields(item_text)
+                shape_body_gbnf_i = _bounded_repeat('indent1 field-decl "\\n"', n_fields_i, n_fields_i)
+                parts.append(f'shape-decl-{i} ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body-{i} "end" " " "shape"')
+                parts.append(f'shape-body-{i} ::= {shape_body_gbnf_i}')
+            if "action" in cats_i:
+                forced_takes_nothing_i = bool(re.search(r"\btakes\s+nothing\b", item_text, re.I))
+                has_takes_clause_i = (not forced_takes_nothing_i) and bool(re.search(r"\btakes\b", item_text, re.I))
+                forced_return_i = _detect_forced_return_dtype(item_text)
+                return_ref_i = forced_return_i if forced_return_i else "return-dtype"
+                if forced_return_i is None:
+                    needs_shared_return_dtype = True
+                if has_takes_clause_i:
+                    any_action_with_params = True
+                    parts.append(f'action-decl-{i} ::= "action" " " identifier " " "takes" " " params-{i} " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
+                    n_params_i = max(1, min(len(re.findall(r'\bas\b', item_text, re.I)) + 1, 6))
+                    params_gbnf_i = _bounded_repeat('" " "and" " " param', n_params_i - 1, 0)
+                    parts.append(f'params-{i}    ::= param {params_gbnf_i}'.rstrip())
+                elif forced_takes_nothing_i:
+                    parts.append(f'action-decl-{i} ::= "action" " " identifier " " "takes" " " "nothing" " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
+                else:
+                    parts.append(f'action-decl-{i} ::= "action" " " identifier " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
+        # shared leaf productions referenced by the per-item rules above
+        # -- generic (field/param shape doesn't depend on WHICH shape or
+        # action it belongs to, only the repetition COUNT does, which is
+        # already captured per-item above), so one shared copy is correct
+        # and avoids duplicate identical rules.
+        if any_shape:
+            parts.append('field-decl    ::= identifier " " as-kw " " dtype')
+        if any_action_with_params:
             parts.append('param         ::= identifier " " as-kw " " dtype')
-        elif forced_takes_nothing:
-            parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " "nothing" " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
-        else:
-            parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
-    parts.append("")
+        parts.append("")
+    else:
+        if "program" in allowed_top:
+            parts.append('program-decl  ::= "program" " " identifier ":"? "\\n" body1 "end" " " "program"')
+        if "shape" in allowed_top:
+            n_fields = _count_shape_fields(text)
+            shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
+            parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
+            parts.append(f'shape-body    ::= {shape_body_gbnf}')
+            parts.append('field-decl    ::= identifier " " as-kw " " dtype')
+        if "action" in allowed_top:
+            # BUGFIX (Tier6/7): the "takes" clause used to always be offered
+            # as optional, even when the plan text never mentions parameters
+            # at all -- giving the model room to invent a takes-clause out of
+            # thin air (and, since the same unrestricted `identifier` rule
+            # was used for the new param name, reuse the action's OWN name
+            # as that param, as seen in Tier6's
+            # `takes ... and unsafe_demo as raw pointer to count`). Only
+            # offer the clause at all when the plan text has a "takes" (or an
+            # explicit "as"-typed parameter list) to justify it.
+            #
+            # BUGFIX (P1_RoleScoped_Call): the naive `\btakes\b` check also
+            # fired on the literal phrase "takes nothing" -- which parser.py
+            # already treats as explicit zero-params syntax, not a param
+            # list -- and routed it into the SAME parameterized grammar
+            # below, whose `params` rule structurally requires at least one
+            # real parameter (see n_params = max(1, ...)). That left the
+            # model no way to satisfy the grammar without inventing a fake
+            # parameter for every action whose plan says "takes nothing",
+            # which is exactly what produced `takes Item as Item` (reusing
+            # the shape's own type name) and the resulting dangling
+            # reference to a field name that was never actually a param.
+            forced_takes_nothing = bool(re.search(r"\btakes\s+nothing\b", text, re.I))
+            has_takes_clause = (not forced_takes_nothing) and bool(re.search(r"\btakes\b", text, re.I))
+            forced_return = _detect_forced_return_dtype(text)
+            return_ref = forced_return if forced_return else "return-dtype"
+            needs_shared_return_dtype = forced_return is None
+            if has_takes_clause:
+                parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " params " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+                n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
+                params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
+                parts.append(f'params        ::= param {params_gbnf}'.rstrip())
+                parts.append('param         ::= identifier " " as-kw " " dtype')
+            elif forced_takes_nothing:
+                parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " "nothing" " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+            else:
+                parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+        parts.append("")
 
     used_stmt_kinds = set()
     outer_text, inner_text = _split_nested_text(text)
@@ -1116,7 +1180,7 @@ def generate(chunk):
         # wasn't already forced to an exact literal (see
         # _detect_forced_return_dtype) -- avoids emitting an unreferenced
         # rule in the common case where the return type is fully pinned.
-        if "action" in allowed_top and forced_return is None:
+        if "action" in allowed_top and needs_shared_return_dtype:
             parts.append(_return_dtype_rule())
         parts.append("")
     parts.append(_identifier_rule(idents))
