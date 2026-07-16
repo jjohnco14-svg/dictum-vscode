@@ -312,6 +312,163 @@ LIBC_RESERVED_SYMBOLS = {
     "strlen", "strcpy", "strcat", "strcmp", "printf", "scanf", "rand", "srand",
 }
 
+# ---------------------------------------------------------------------
+# DISPOSABLE-RESERVE IMPORT_C MECHANISM
+# ---------------------------------------------------------------------
+# Two independent problems, both upstream of "could the model
+# hallucinate an import": (1) chunk_grammar.py never emits a grammar
+# path for `import from C ...` at all for any OPERATION/MODIFY/
+# INVARIANT/MEMORY/SAFETY chunk (STMT_TRIGGERS/allowed_top never
+# include it), and (2) most named C functions besides sqrt have no
+# parseable NL form in parser.py's prefix-expression grammar (floor/
+# ceil/fabs/log have none at all; sqrt only works if the model happens
+# to write "square root of" instead of a plan's literal "the sqrt of").
+# So today an IMPORT_C item for floor/ceil/fabs/log is unsatisfiable no
+# matter how good the grammar or the model is -- fixing that has to
+# come before a whitelist matters at all.
+#
+# The fix: render the `import from C ...` statement DETERMINISTICALLY
+# (never model-sampled -- there's nothing to hallucinate in a line the
+# model never had to produce), then let the ordinary, already-supported
+# `call c_{name} with X giving Result` statement reach it from inside
+# the chunk's normal grammar-constrained body. The whitelist
+# (KNOWN_C_IMPORTS) is the hard gate that keeps this narrow even across
+# a build with hundreds of IMPORT_C-style plan items: the candidate set
+# for any ONE chunk is {KNOWN_C_IMPORTS} intersect {names literally in
+# THIS chunk's own plan text}, minus {names an earlier chunk already
+# imported} -- usually exactly one name, occasionally two or three,
+# never a large menu, because a plan's own chunk text is always small
+# and the table itself never grows without a matching KNOWN_C_IMPORTS
+# entry (and therefore a real, deliberately-added param/return-type
+# mapping) being added by hand.
+KNOWN_C_IMPORTS = {
+    # Every one of these is unary (one double in, one double out) --
+    # exactly the family PATTERN_MATCH_RULES's importc-math entry
+    # already recognizes (see below), so this doesn't introduce a new
+    # detection surface, only a real rendering path for it.
+    "sqrt":  (["decimal number"], "decimal number"),
+    "cos":   (["decimal number"], "decimal number"),
+    "sin":   (["decimal number"], "decimal number"),
+    "floor": (["decimal number"], "decimal number"),
+    "ceil":  (["decimal number"], "decimal number"),
+    "fabs":  (["decimal number"], "decimal number"),
+    "exp":   (["decimal number"], "decimal number"),
+    "log":   (["decimal number"], "decimal number"),
+}
+
+_C_IMPORT_MENTION_RE = re.compile(r"\bimport from c\b", re.I)
+_C_IMPORT_FUNC_RE = re.compile(r"\b(" + "|".join(sorted(KNOWN_C_IMPORTS)) + r")\b", re.I)
+# Matches the exact deterministic line render_c_import_line() emits, so
+# "already imported by an earlier chunk" is read back from the SAME
+# literal shape this module writes -- one format, not two independently
+# maintained ones.
+_C_IMPORT_ALREADY_RE = re.compile(r"^\s*import from C the action (\w+)\b", re.I | re.M)
+
+
+def extract_chunk_c_imports(text):
+    """Every KNOWN_C_IMPORTS name this CHUNK'S OWN plan text names --
+    but ONLY when the text also contains the literal phrase 'import
+    from c', the exact same gate PATTERN_MATCH_RULES's importc-math
+    entry already uses. Without that gate, an unrelated plan sentence
+    that happens to contain one of these short words (e.g. "the log of
+    the incident", "sin" as part of another word matched loosely) could
+    fire; requiring 'import from c' in the same chunk keeps this tied
+    to plan items that are actually asking for a C import.
+
+    Names are returned in first-appearance order, deduplicated. This IS
+    the hard gate the disposable-reserve idea calls for: even with 200
+    IMPORT_C-shaped plan items across a whole build, no single chunk's
+    candidate set is ever more than {KNOWN_C_IMPORTS} intersect {this
+    chunk's own literal words} -- never the full table, because nothing
+    outside this one chunk's own text is ever consulted here."""
+    if not _C_IMPORT_MENTION_RE.search(text or ""):
+        return []
+    seen, found = set(), []
+    for m in _C_IMPORT_FUNC_RE.finditer(text):
+        name = m.group(1).lower()
+        if name not in seen:
+            seen.add(name)
+            found.append(name)
+    return found
+
+
+def already_imported_c_names(accumulated_source):
+    """Every C function name already given a deterministic `import from
+    C the action <name> ...` line by an EARLIER chunk in this build.
+    Parsed straight from the accumulated source, the same way
+    chunkGrammar.js's extractReservedNames tracks shape/action/field
+    names already committed by prior chunks -- one cross-chunk 'what's
+    already declared' channel, not a second one invented just for
+    imports."""
+    return {m.group(1).lower() for m in _C_IMPORT_ALREADY_RE.finditer(accumulated_source or "")}
+
+
+def render_c_import_line(name):
+    """Deterministically renders ONE `import from C ...` top-level
+    statement for a KNOWN_C_IMPORTS name. Never model-sampled -- there
+    is nothing here for a model to hallucinate, because the model never
+    produces this line at all. `c_{name}` (e.g. c_sqrt) is the
+    Dictum-visible alias, reachable from an ordinary, already-supported
+    `call c_{name} with X giving Result` statement inside the chunk's
+    normal grammar-constrained body -- this sidesteps both the
+    unsatisfiable-grammar problem (no grammar path emits `import` at
+    all) and the NL-ambiguity problem (parser.py's builtin prefix-
+    expression forms only cover a few of these functions, and only via
+    wording a plan's literal 'the sqrt of X' doesn't use) with one
+    uniform mechanism for every name in the table."""
+    if name not in KNOWN_C_IMPORTS:
+        raise ValueError(f"'{name}' is not in KNOWN_C_IMPORTS -- refusing to render an import for it")
+    param_types, ret_type = KNOWN_C_IMPORTS[name]
+    return f'import from C the action {name} takes {" and ".join(param_types)} produces {ret_type} as c_{name}'
+
+
+def prepare_c_imports(chunk, accumulated_source=""):
+    """The disposable-reserve entry point: given one chunk and the
+    build's accumulated source so far, returns (import_lines,
+    alias_names):
+      - import_lines: ready-to-prepend, deterministic top-level
+        `import from C ...` statements for every name this chunk's own
+        text asks for that no earlier chunk already imported.
+      - alias_names: the Dictum-visible aliases (e.g. ["c_sqrt"]) for
+        EVERY name this chunk's own text needs -- whether import_lines
+        is importing it right now, or an earlier chunk already did.
+        Meant to be passed to generate() as chunk["extra_identifiers"]
+        (see generate()'s handling below) so THIS SAME chunk's body
+        grammar can legally reference them as a call target, while
+        still being excluded from decl positions -- an alias can't also
+        get accidentally keep-declared as a local variable in the same
+        chunk, regardless of which chunk actually imported it.
+    Callers (the real integration point is the Build loop in
+    out/extension.js, mirroring how it already special-cases MEMORY/
+    SAFETY chunks for needsUnsafe) should:
+      1. call this before generate(), with the accumulated source so
+         far;
+      2. prepend `import_lines` to whatever generate()+the model
+         produce for this chunk;
+      3. pass `alias_names` into chunk["extra_identifiers"] before
+         calling generate().
+    Zero effect on chunks whose text never says 'import from c' --
+    returns ([], []) immediately for those, so this is strictly
+    additive and touches nothing else in the pipeline."""
+    items = chunk.get("items") or []
+    text = _all_desc(items)
+    needed = extract_chunk_c_imports(text)
+    if not needed:
+        return [], []
+    already = already_imported_c_names(accumulated_source)
+    new_names = [n for n in needed if n not in already]
+    import_lines = [render_c_import_line(n) for n in new_names]
+    # alias_names covers EVERY name this chunk needs, whether it's the
+    # one importing it right now (new_names) or reusing an import an
+    # EARLIER chunk already emitted (in `already`) -- a later chunk that
+    # also calls c_sqrt must still get "c_sqrt" as a legal call-target
+    # candidate in ITS OWN grammar even though it isn't re-importing it
+    # (re-importing the same C symbol twice would itself be a
+    # redeclaration bug, which is exactly what `already` prevents).
+    alias_names = [f"c_{n}" for n in needed]
+    return import_lines, alias_names
+
+
 CMP_PHRASES = {
     "not equal to": '"not" " " "equal" " " "to"',
     "equal to": '"equal" " " "to"',
@@ -677,6 +834,73 @@ def _identifier_rule(candidates):
     return f'identifier    ::= {lits}'
 
 
+def _reserved_name_strs(reserved_names):
+    """Normalizes reserved_names into a lowercase set of plain name
+    strings. Accepts either the legacy flat-string form (`["Player",
+    "World"]`) or the kind-tagged form (`[{"name": "Player", "kind":
+    "shape"}, ...]`) -- callers on the JS side are migrating to the
+    latter (see chunkGrammar.js's extractReservedNames) but every
+    Python-side consumer of reserved_names goes through this one
+    function so neither form has to be special-cased more than once,
+    and old callers passing flat strings keep working unchanged."""
+    out = set()
+    for n in (reserved_names or []):
+        if isinstance(n, dict):
+            name = n.get("name")
+        else:
+            name = n
+        if name:
+            out.add(str(name).lower())
+    return out
+
+
+def _decl_name_candidates(idents, text, reserved_names=None):
+    """Role-scoped candidate list for a NEW declaration's own name slot
+    -- the identifier immediately after the `program`/`shape`/`action`
+    keyword in program-decl/shape-decl/action-decl. Distinct from both
+    `identifier` (general reference position -- call targets, a type
+    reference to an already-declared shape, etc., which legitimately
+    need to be able to NAME a reserved thing) and `decl-identifier`
+    (keep-stmt's declared local-variable name, scoped by
+    _decl_identifier_candidates above).
+
+    Fixes C1 ("'Player' redeclared as different kind of symbol"):
+    reserved_names (every shape/action/field name already emitted by an
+    EARLIER chunk in this build) used to have no effect on this slot at
+    all -- action-decl/program-decl/shape-decl referenced the exact same
+    unfiltered `identifier` production every reference position used,
+    so a later OPERATION chunk's action-decl could pick an
+    already-declared shape's name (e.g. "Player") as its OWN new name.
+    That's legal under the old shared-identifier grammar and an
+    immediate C redeclaration once emitted. Excluding reserved_names
+    here closes that at the grammar level -- the model structurally
+    cannot sample an already-taken name for a new declaration.
+
+    Falls back to the unfiltered idents list if exclusion would empty
+    the candidate set entirely (no other option would exist either, and
+    _decl_name_rule falls back to an open identifier class in that
+    case)."""
+    exclude = _reserved_name_strs(reserved_names)
+    if not exclude:
+        return list(idents)
+    filtered = [c for c in idents if c.lower() not in exclude]
+    return filtered or list(idents)
+
+
+def _decl_name_rule(candidates):
+    """Same shape as _identifier_rule/_decl_identifier_rule, but its own
+    rule NAME (decl-name) so a new declaration's own name slot can be
+    role-scoped independently of both the general reference `identifier`
+    rule and keep-stmt's `decl-identifier` rule -- see
+    _decl_name_candidates. Empty candidates falls back to an open
+    identifier class rather than to the unfiltered list, so it can't
+    silently reopen the C1 bug this rule exists to close."""
+    if not candidates:
+        return 'decl-name     ::= [a-zA-Z_] [a-zA-Z0-9_]*'
+    lits = " | ".join(f'"{c}"' for c in candidates)
+    return f'decl-name     ::= {lits}'
+
+
 def _decl_identifier_candidates(idents, text, reserved_names=None):
     """Role-scoped candidate list for keep-stmt's DECLARED-name slot:
     every extracted identifier EXCEPT names already in scope as a
@@ -719,8 +943,7 @@ def _decl_identifier_candidates(idents, text, reserved_names=None):
     if own_name:
         exclude.add(own_name.lower())
     exclude |= LIBC_RESERVED_SYMBOLS
-    if reserved_names:
-        exclude |= {str(n).lower() for n in reserved_names}
+    exclude |= _reserved_name_strs(reserved_names)
     filtered = [c for c in idents if c.lower() not in exclude]
     return filtered
 
@@ -1006,7 +1229,8 @@ def _validate_rule_names(gbnf_text):
 
 def generate(chunk):
     """chunk: {"tierName": str, "items": [{"category","id","desc"}, ...],
-    "unsafe": bool, "reserved_names": [str, ...] (optional)}. Returns
+    "unsafe": bool, "reserved_names": [str, ...] (optional),
+    "extra_identifiers": [str, ...] (optional)}. Returns
     GBNF text, or raises ValueError if the chunk has no items (nothing
     to scope a grammar to).
 
@@ -1014,7 +1238,17 @@ def generate(chunk):
     accumulated source by EARLIER chunks in this same build (see
     _decl_identifier_candidates). Optional and additive -- omitting it
     reproduces the previous (narrower, in-chunk-only) exclusion
-    behavior, it never makes the grammar MORE permissive than before."""
+    behavior, it never makes the grammar MORE permissive than before.
+
+    extra_identifiers: names this chunk should be able to reference
+    (e.g. call as a target) even though they don't appear literally in
+    this chunk's own plan text -- currently used by the
+    disposable-reserve IMPORT_C mechanism (see prepare_c_imports) to
+    make a just-imported C alias like "c_sqrt" callable from the same
+    chunk that imported it. Folded into both idents (so it's a legal
+    reference/call-target candidate) and reserved_names (so it's
+    excluded from decl positions) -- see the handling right below.
+    Optional; omitting it reproduces the exact previous behavior."""
     items = chunk.get("items") or []
     if not items:
         raise ValueError("chunk has no items")
@@ -1024,6 +1258,23 @@ def generate(chunk):
     text = _all_desc(items)
 
     idents = extract_identifiers(items)
+    # DISPOSABLE-RESERVE IMPORT_C: extra_identifiers are Dictum-visible
+    # C-import aliases (e.g. "c_sqrt") that prepare_c_imports() decided
+    # THIS chunk needs -- they don't appear literally in this chunk's
+    # plan text (the plan says "sqrt", not "c_sqrt"), so extract_
+    # identifiers() alone would never surface them as a candidate. Added
+    # to idents so `identifier`/call-target position can reference them
+    # (`call c_sqrt with X giving Result`), and ALSO folded into
+    # reserved_names so decl-name/decl-identifier's exclusion sets treat
+    # them exactly like any other already-taken name -- an alias that
+    # was just deterministically imported can't turn around and get
+    # keep-declared as a plain local variable in the same chunk.
+    extra_identifiers = chunk.get("extra_identifiers") or []
+    if extra_identifiers:
+        for name in extra_identifiers:
+            if name not in idents:
+                idents.append(name)
+        reserved_names = list(reserved_names) + list(extra_identifiers)
     cmp_found = detect_cmp_ops(text)
     arith_found = detect_arith_ops(text)
     dtype_found = detect_dtypes(text)
@@ -1147,12 +1398,12 @@ def generate(chunk):
             parts.append(f"top-decl-{i}  ::= {top_alt_i}")
 
             if "program" in cats_i:
-                parts.append(f'program-decl-{i} ::= "program" " " identifier ":"? "\\n" body1 "end" " " "program"')
+                parts.append(f'program-decl-{i} ::= "program" " " decl-name ":"? "\\n" body1 "end" " " "program"')
             if "shape" in cats_i:
                 any_shape = True
                 n_fields_i = _count_shape_fields(item_text)
                 shape_body_gbnf_i = _bounded_repeat('indent1 field-decl "\\n"', n_fields_i, n_fields_i)
-                parts.append(f'shape-decl-{i} ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body-{i} "end" " " "shape"')
+                parts.append(f'shape-decl-{i} ::= "shape" " " decl-name " " "holds" ":"? "\\n" shape-body-{i} "end" " " "shape"')
                 parts.append(f'shape-body-{i} ::= {shape_body_gbnf_i}')
             if "action" in cats_i:
                 forced_takes_nothing_i = bool(re.search(r"\btakes\s+nothing\b", item_text, re.I))
@@ -1163,14 +1414,14 @@ def generate(chunk):
                     needs_shared_return_dtype = True
                 if has_takes_clause_i:
                     any_action_with_params = True
-                    parts.append(f'action-decl-{i} ::= "action" " " identifier " " "takes" " " params-{i} " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
+                    parts.append(f'action-decl-{i} ::= "action" " " decl-name " " "takes" " " params-{i} " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
                     n_params_i = max(1, min(len(re.findall(r'\bas\b', item_text, re.I)) + 1, 6))
                     params_gbnf_i = _bounded_repeat('" " "and" " " param', n_params_i - 1, 0)
                     parts.append(f'params-{i}    ::= param {params_gbnf_i}'.rstrip())
                 elif forced_takes_nothing_i:
-                    parts.append(f'action-decl-{i} ::= "action" " " identifier " " "takes" " " "nothing" " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
+                    parts.append(f'action-decl-{i} ::= "action" " " decl-name " " "takes" " " "nothing" " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
                 else:
-                    parts.append(f'action-decl-{i} ::= "action" " " identifier " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
+                    parts.append(f'action-decl-{i} ::= "action" " " decl-name " " "produces" " " {return_ref_i} ":"? "\\n" body1 "end" " " "action"')
         # shared leaf productions referenced by the per-item rules above
         # -- generic (field/param shape doesn't depend on WHICH shape or
         # action it belongs to, only the repetition COUNT does, which is
@@ -1183,11 +1434,11 @@ def generate(chunk):
         parts.append("")
     else:
         if "program" in allowed_top:
-            parts.append('program-decl  ::= "program" " " identifier ":"? "\\n" body1 "end" " " "program"')
+            parts.append('program-decl  ::= "program" " " decl-name ":"? "\\n" body1 "end" " " "program"')
         if "shape" in allowed_top:
             n_fields = _count_shape_fields(text)
             shape_body_gbnf = _bounded_repeat('indent1 field-decl "\\n"', n_fields, n_fields)
-            parts.append('shape-decl    ::= "shape" " " identifier " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
+            parts.append('shape-decl    ::= "shape" " " decl-name " " "holds" ":"? "\\n" shape-body "end" " " "shape"')
             parts.append(f'shape-body    ::= {shape_body_gbnf}')
             parts.append('field-decl    ::= identifier " " as-kw " " dtype')
         if "action" in allowed_top:
@@ -1218,15 +1469,15 @@ def generate(chunk):
             return_ref = forced_return if forced_return else "return-dtype"
             needs_shared_return_dtype = forced_return is None
             if has_takes_clause:
-                parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " params " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+                parts.append(f'action-decl   ::= "action" " " decl-name " " "takes" " " params " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
                 n_params = max(1, min(len(re.findall(r'\bas\b', text, re.I)) + 1, 6))
                 params_gbnf = _bounded_repeat('" " "and" " " param', n_params - 1, 0)
                 parts.append(f'params        ::= param {params_gbnf}'.rstrip())
                 parts.append('param         ::= identifier " " as-kw " " dtype')
             elif forced_takes_nothing:
-                parts.append(f'action-decl   ::= "action" " " identifier " " "takes" " " "nothing" " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+                parts.append(f'action-decl   ::= "action" " " decl-name " " "takes" " " "nothing" " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
             else:
-                parts.append(f'action-decl   ::= "action" " " identifier " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
+                parts.append(f'action-decl   ::= "action" " " decl-name " " "produces" " " {return_ref} ":"? "\\n" body1 "end" " " "action"')
         parts.append("")
 
     used_stmt_kinds = set()
@@ -1377,6 +1628,14 @@ def generate(chunk):
         if "action" in allowed_top and needs_shared_return_dtype:
             parts.append(_return_dtype_rule())
         parts.append("")
+    # PHASE 2 FIX (C1): decl-name is the new-declaration name slot used by
+    # every program-decl/shape-decl/action-decl production above -- kept
+    # separate from `identifier` (reference positions still need to be
+    # able to name a reserved thing, e.g. a call target or an existing
+    # shape's type name) so that reserved_names can exclude it from ONLY
+    # the "declare a brand-new thing" slot without narrowing reference
+    # positions at all.
+    parts.append(_decl_name_rule(_decl_name_candidates(idents, text, reserved_names)))
     parts.append(_identifier_rule(idents))
     parts.append(_TERMINALS_BASE)
     if include_repeat or unsafe:
@@ -1417,6 +1676,27 @@ def _self_test():
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         _self_test()
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "--prepare-c-imports":
+        # Bridge entry point for the disposable-reserve IMPORT_C
+        # mechanism (see prepare_c_imports above). Input:
+        # {"chunk": {...same shape generate() takes...},
+        #  "accumulated": "<build's accumulated source so far>"}.
+        # Output (always JSON, always exit 0 on a well-formed request,
+        # matching every other bridge's fail-quiet contract so a caller
+        # like out/chunkGrammar.js can treat "no exception" the same
+        # way regardless of what's inside):
+        # {"ok": true, "import_lines": [...], "alias_names": [...]}
+        # or {"ok": false, "error": "..."} if the payload itself was
+        # unusable (never a stack trace on stdout).
+        try:
+            payload = json.load(sys.stdin)
+            chunk = payload.get("chunk") or {}
+            accumulated = payload.get("accumulated") or ""
+            import_lines, alias_names = prepare_c_imports(chunk, accumulated)
+            json.dump({"ok": True, "import_lines": import_lines, "alias_names": alias_names}, sys.stdout)
+        except Exception as e:
+            json.dump({"ok": False, "error": str(e)}, sys.stdout)
         return
     try:
         chunk = json.load(sys.stdin)

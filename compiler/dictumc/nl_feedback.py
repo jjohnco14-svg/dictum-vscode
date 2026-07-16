@@ -35,6 +35,76 @@ import json
 import re
 import sys
 
+# PHASE 3: N1/N2-class ambiguity detector. The root cause behind N1
+# ("program AddTwo - calls action add_two and prints the result") and
+# N2's ARCHITECTURE items isn't a pipeline bug -- try_sequential_expand
+# correctly declines them (out_of_scope_params/call, not this chunk's
+# concern), and the model path's grammar is satisfiable in principle.
+# The actual problem is that "the result" never gets bound to a real
+# identifier anywhere in the plan text: nothing ever writes
+# `giving <Name>` before "prints the result" references it, so no
+# amount of retrying the SAME wording can produce a parseable capture
+# -- the model has to invent a variable name from nothing, differently
+# each attempt, and normalize_dictum.py/parser.py have no fixed target
+# to check that invention against.
+#
+# This mirrors _render_seq_clause's own "call" clause shape (see
+# pattern_graph.py) -- a call either has `giving <Name>` (capturing the
+# return value under a real, referenceable identifier) or it doesn't
+# (a bare fire-and-forget call). "Calls X and prints/uses the result"
+# without ever naming that captured value is the exact gap: a
+# call-then-reference-by-vague-noun pattern with no `giving` clause in
+# between.
+_UNCAPTURED_CALL_THEN_RESULT_RE = re.compile(
+    r"\bcalls?\s+(?:action\s+)?(\w+)\b"          # "calls action add_two" / "calls add_two"
+    r"(?![^.]*\bgiving\b)"                        # ... with no 'giving <Name>' anywhere after it in this sentence
+    r"[^.]*?\b(?:the|its)\s+(result|value|output|answer)\b",  # ... before a vague back-reference
+    re.I,
+)
+
+
+def detect_unbound_reference(plan_text):
+    """Scans one chunk's raw plan text (not generated code) for the
+    N1/N2 shape: a call to some action, followed by a vague reference
+    ("the result"/"the value"/"the output"/"the answer") that was never
+    bound to a real name via a `giving <Name>` clause anywhere in that
+    same sentence. Returns None if no such pattern is found, else a
+    dict: {"callee": <action name>, "vague_term": <the word used>,
+    "suggestion": <ready-to-use corrected phrasing>}.
+
+    This is deliberately scoped to PLAN text, not generated code -- the
+    ambiguity lives in the plan's wording itself (see module docstring
+    and Cell 13's finding that N1/N2 fail identically across all 3
+    retries with the SAME plan text), so re-running generation against
+    the same unchanged plan sentence can't fix it. The fix has to
+    either reword the plan (upstream) or hand the model a concrete
+    substitute name to use (this function's `suggestion`), which is
+    exactly the "structured retry prompt" the proposed Phase 3 calls
+    for instead of just re-showing a parser error."""
+    if not plan_text:
+        return None
+    m = _UNCAPTURED_CALL_THEN_RESULT_RE.search(plan_text)
+    if not m:
+        return None
+    callee, vague_term = m.group(1), m.group(2)
+    capture_name = "Result"
+    return {
+        "callee": callee,
+        "vague_term": vague_term,
+        "suggestion": (
+            f"call {callee} with <its arguments> giving {capture_name}, "
+            f"print the number {capture_name}"
+        ),
+        "explanation": (
+            f"This plan item calls '{callee}' and then refers to \"the {vague_term}\" "
+            f"without ever naming it. Dictum has no way to reference a call's return "
+            f"value unless it's captured with a 'giving <Name>' clause first -- "
+            f"rewrite this as something like: call {callee} with <its arguments> "
+            f"giving {capture_name}, print the number {capture_name}."
+        ),
+    }
+
+
 _PARAM_TYPE_COLLAPSE_RE = re.compile(
     r"parameter/type collapse: '(\w+)' used as both name and type"
 )
@@ -95,7 +165,7 @@ def _quote_line(code, line_no):
     return f' Line {line_no} reads: "{ctx}".' if ctx else f" (line {line_no})"
 
 
-def explain(stage, detail, code=None):
+def explain(stage, detail, code=None, plan_text=None):
     """stage: 'normalize' | 'parse' | 'review' | 'compile' -- used only
     to phrase the opening clause naturally if a caller wants to prefix
     it; NEVER used to pick which pattern to check. A failure signature
@@ -105,7 +175,20 @@ def explain(stage, detail, code=None):
     than one call site in the pipeline.
     code: the chunk's generated Dictum text, if available -- used only
     to quote the offending line back for context, never to re-derive
-    the diagnosis (the diagnosis always comes from `detail` alone)."""
+    the diagnosis (the diagnosis always comes from `detail` alone).
+    plan_text: PHASE 3 (optional, additive): the chunk's raw plan text,
+    if available. Checked first, ahead of every parser-error pattern
+    below -- a call-then-vague-reference ambiguity (see
+    detect_unbound_reference) is a plan-wording problem, not a
+    generation mistake, so retrying generation against the same
+    unchanged plan text can't fix it no matter how many attempts are
+    spent. Omitting plan_text reproduces the exact previous behavior;
+    this is purely additive."""
+    if plan_text:
+        unbound = detect_unbound_reference(plan_text)
+        if unbound:
+            return unbound["explanation"]
+
     detail = (detail or "").strip()
     if not detail:
         return (
@@ -206,24 +289,42 @@ def _bridge_main():
     stage = payload.get("stage", "")
     detail = payload.get("detail", "")
     code = payload.get("code")
-    json.dump({"explanation": explain(stage, detail, code)}, sys.stdout)
+    plan_text = payload.get("plan_text")
+    json.dump({"explanation": explain(stage, detail, code, plan_text)}, sys.stdout)
 
 
 def _self_test():
     cases = [
-        ("normalize", "parameter/type collapse: 'unsafe_demo' used as both name and type", None),
-        ("normalize", "duplicate parameter name 'x' within one takes-clause", None),
+        ("normalize", "parameter/type collapse: 'unsafe_demo' used as both name and type", None, None),
+        ("normalize", "duplicate parameter name 'x' within one takes-clause", None, None),
         ("parse", "Unknown top-level 'while' at line 3",
-         "program X\nwhile Y is greater than 0 repeat\nend program\n"),
+         "program X\nwhile Y is greater than 0 repeat\nend program\n", None),
         ("parse", "Expected 'as', got 'is' at line 2",
-         "action foo produces nothing\n    keep X is count\nend action\n"),
-        ("parse", "Unexpected 'end' at line 4", "action foo produces nothing\nend action\nend action\n"),
-        ("parse", "", None),
+         "action foo produces nothing\n    keep X is count\nend action\n", None),
+        ("parse", "Unexpected 'end' at line 4", "action foo produces nothing\nend action\nend action\n", None),
+        ("parse", "", None, None),
+        # PHASE 3: N1/N2-shaped plan ambiguity, detected from plan_text
+        # alone (detail/code don't even matter here -- this is checked
+        # before any of the parser-error patterns).
+        ("parse", "some parser error", None,
+         "program AddTwo - calls action add_two and prints the result"),
+        ("parse", "some parser error", None,
+         "program CheckPositive - calls action classify with a whole number and prints the result"),
     ]
-    for stage, detail, code in cases:
-        out = explain(stage, detail, code)
+    for stage, detail, code, plan_text in cases:
+        out = explain(stage, detail, code, plan_text)
         assert out and isinstance(out, str) and len(out) > 0
-        print(f"[{stage or '(none)'}] {detail or '(empty)'}\n  -> {out}\n")
+        print(f"[{stage or '(none)'}] {detail or '(empty)'} | plan_text={plan_text!r}\n  -> {out}\n")
+
+    # detect_unbound_reference direct cases
+    assert detect_unbound_reference("program AddTwo - calls action add_two and prints the result") is not None
+    assert detect_unbound_reference(
+        "action print_square takes N as whole number produces nothing - "
+        "call square with N giving Result, print the number Result"
+    ) is None, "a real 'giving' capture must NOT be flagged as unbound"
+    assert detect_unbound_reference("") is None
+    assert detect_unbound_reference(None) is None
+
     print("nl_feedback self-test OK")
 
 

@@ -523,32 +523,70 @@ def _render_seq_clause(kind, m, declared_names=None):
 def try_sequential_expand(chunk):
     """General Phase-2 fast path: given a full chunk (same
     {"tierName","items","unsafe"} shape chunk_grammar.generate() takes),
-    returns a complete Dictum action if its ENTIRE body is a mechanical
-    sequence of keep/set/print/call/release statements with no control
-    flow, no unsafe block, and no params -- else None (fall back to the
-    normal grammar+LLM path, unchanged from before this function
-    existed). See the module comment above for the exact scope
-    boundaries and why each one is drawn where it is."""
+    returns (bound, diag):
+      - bound: a complete Dictum action/program if its ENTIRE body is a
+        mechanical sequence of keep/set/print/call/release statements
+        with no control flow, no unsafe block, and no params -- else
+        None (fall back to the normal grammar+LLM path, unchanged from
+        before this function existed).
+      - diag: None on success. On decline, a dict describing WHY:
+        {"reason": <short machine-readable tag>, "detail": <human
+        sentence>}. PHASE 3 FIX: this used to be a bare `return None` at
+        every bail-out (module docstring/Cell 13 notes: "try_sequential_
+        expand silently returns None whenever it encounters an
+        unrecognized segment, with no diagnostic information about what
+        failed or where"). Declining this fast path is a completely
+        normal, expected outcome for most chunks (control flow, params,
+        and unsafe blocks are all explicitly out of scope for it, not
+        bugs) -- so `diag["reason"]` distinguishes "not eligible for
+        this fast path at all" (out_of_scope_*) from "eligible in shape,
+        but the plan text itself didn't parse cleanly" (clause_mismatch/
+        unresolved_clause/render_failed), since only the latter is a
+        genuine signal worth feeding back into a retry/ambiguity loop
+        (see nl_feedback.detect_unbound_reference for exactly that
+        follow-up on the render_failed/call-without-capture case).
+        Every caller must keep treating `bound is None` as "fall through
+        to the grammar+model path" -- diag is additive/informational
+        only, never a hard failure."""
+    def _decline(reason, detail):
+        return None, {"reason": reason, "detail": detail}
+
     items = chunk.get("items") or []
-    if not items or chunk.get("unsafe"):
-        return None
+    if not items:
+        return _decline("empty_chunk", "This chunk has no plan items to expand.")
+    if chunk.get("unsafe"):
+        return _decline("out_of_scope_unsafe",
+                         "Chunk is marked unsafe; the sequential fast path never "
+                         "handles unsafe blocks (out of scope by design).")
     text = _cg._all_desc(items)
 
     if _cg.detect_control_kinds(text):
-        return None
+        return _decline("out_of_scope_control_flow",
+                         "Plan text describes control flow (if/while/repeat); the "
+                         "sequential fast path only handles a flat statement list.")
     if _cg.detect_unsafe_names(text):
-        return None
+        return _decline("out_of_scope_unsafe_names",
+                         "Plan text references unsafe primitives (RAW_MALLOC/"
+                         "RAW_FREE/ATOMIC_FAA/...); out of scope for this fast path.")
     if re.search(r"\btakes\b", text, re.I):
-        return None
+        return _decline("out_of_scope_params",
+                         "Plan text declares parameters ('takes ...'); the sequential "
+                         "fast path only handles zero-parameter actions/programs.")
     if _cg.detect_arith_ops(text) or _cg.detect_cmp_ops(text):
-        return None
+        return _decline("out_of_scope_expressions",
+                         "Plan text uses arithmetic or comparison operators; out of "
+                         "scope for this fast path's flat statement sequencer.")
 
     action_name = _cg._extract_own_name(text)
     if not action_name:
-        return None
+        return _decline("no_decl_name",
+                         "Couldn't find a 'program <Name>'/'shape <Name>'/"
+                         "'action <Name>' header in this chunk's plan text.")
     return_dtype = _plain_forced_return_dtype(text)
     if return_dtype is None:
-        return None
+        return _decline("no_forced_return_dtype",
+                         "Couldn't pin down a single unambiguous return type "
+                         "('produces <type>') for this chunk's plan text.")
 
     # Scan for statement triggers only in the BODY, i.e. after the
     # "action <name>" declaration itself. Without this, an action whose
@@ -562,14 +600,18 @@ def try_sequential_expand(chunk):
     if decl_kind == "shape":
         # A shape has no statement body to sequence at all (only field
         # declarations) -- out of scope for this expander.
-        return None
+        return _decline("out_of_scope_shape",
+                         "This chunk declares a shape, which has fields, not a "
+                         "statement body -- out of scope for this expander.")
 
     triggers = []
     for kind, pat in _cg.STMT_TRIGGERS.items():
         for tm in re.finditer(pat, body_text, re.I):
             triggers.append((tm.start(), kind))
     if not triggers:
-        return None
+        return _decline("no_triggers",
+                         "No keep/set/print/call/release statement was recognized "
+                         "in this chunk's body text.")
     triggers.sort(key=lambda t: t[0])
 
     lines = []
@@ -579,21 +621,31 @@ def try_sequential_expand(chunk):
         segment = body_text[start:end]
         m = _SEQ_CLAUSE_PATTERNS[kind].match(segment)
         if not m:
-            return None
+            return _decline("clause_mismatch",
+                             f"A '{kind}' statement was detected, but its exact wording "
+                             f"('{segment.strip()[:80]}') didn't match the expected "
+                             f"surface syntax for '{kind}'.")
         leftover = segment[m.end():]
         if not _LEFTOVER_OK_RE.match(leftover):
-            return None
+            return _decline("unresolved_clause",
+                             f"After matching the '{kind}' statement, leftover text "
+                             f"('{leftover.strip()[:80]}') doesn't fit any recognized "
+                             f"continuation -- likely an unbound reference or a second "
+                             f"clause run together with the first.")
         line = _render_seq_clause(kind, m, declared_names)
         if line is None:
-            return None
+            return _decline("render_failed",
+                             f"The '{kind}' statement matched, but rendering it back "
+                             f"to Dictum surface syntax failed (e.g. an unrecognized "
+                             f"dtype phrase for a 'keep').")
         lines.append(line)
         if kind == "keep":
             declared_names.add(m.group("name"))
 
     body = "\n".join(f"    {ln}" for ln in lines)
     if decl_kind == "program":
-        return f"program {action_name}:\n{body}\nend program"
-    return f"action {action_name} produces {return_dtype}:\n{body}\nend action"
+        return f"program {action_name}:\n{body}\nend program", None
+    return f"action {action_name} produces {return_dtype}:\n{body}\nend action", None
 
 
 def render_context(pattern_ref, params=None):
@@ -642,6 +694,7 @@ def _bridge_main():
         params = payload.get("params")
         plan_text = payload.get("plan_text")
         chunk = payload.get("chunk")
+        sequential_declined = None
         # Phase 2 fast path: general sequential-statement expansion.
         # Checked first and independently of pattern_ref -- this one
         # isn't keyed to a named pattern at all, just to the shape of
@@ -649,11 +702,20 @@ def _bridge_main():
         # supplies "chunk"; every existing caller that doesn't is
         # byte-identical to before this existed.
         if chunk:
-            sequential = try_sequential_expand(chunk)
+            sequential, seq_diag = try_sequential_expand(chunk)
             if sequential is not None:
                 json.dump({"ok": True, "deterministic": True, "expansion": "sequential",
                            "bound": sequential, "rendered": None}, _sys.stdout)
                 return
+            # PHASE 3: surface WHY the fast path declined instead of
+            # silently falling through with no trace at all. Purely
+            # additive -- callers that only ever checked `expansion ==
+            # "sequential"` before still see the exact same fallthrough
+            # behavior; `sequential_declined` is a new, optional key
+            # threaded into whichever response shape ends up returned
+            # below (pattern-path success, or the render_context
+            # fallback), never dropped on the floor.
+            sequential_declined = seq_diag
         # Optional fast path: only taken if the caller supplied plan_text
         # AND this pattern_ref is one of the fully-mechanical constructs
         # AND the text actually contains everything needed. Every other
@@ -664,11 +726,17 @@ def _bridge_main():
         if plan_text:
             deterministic = try_deterministic_expand(pattern_ref, plan_text)
             if deterministic is not None:
-                json.dump({"ok": True, "deterministic": True, "expansion": "pattern",
-                           "bound": deterministic, "rendered": None}, _sys.stdout)
+                resp = {"ok": True, "deterministic": True, "expansion": "pattern",
+                        "bound": deterministic, "rendered": None}
+                if sequential_declined:
+                    resp["sequential_declined"] = sequential_declined
+                json.dump(resp, _sys.stdout)
                 return
         rendered, bound = render_context(pattern_ref, params)
-        json.dump({"ok": True, "deterministic": False, "rendered": rendered, "bound": bound}, _sys.stdout)
+        resp = {"ok": True, "deterministic": False, "rendered": rendered, "bound": bound}
+        if sequential_declined:
+            resp["sequential_declined"] = sequential_declined
+        json.dump(resp, _sys.stdout)
     except (PatternNotFound, PatternSchemaError, PatternBindingError) as e:
         json.dump({"ok": False, "detail": str(e)}, _sys.stdout)
     except Exception as e:

@@ -12,11 +12,12 @@
 // separate means chunking.js keeps its existing zero-external-dependency
 // property.
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.generateChunkGrammar = generateChunkGrammar;
-exports.extractReservedNames = extractReservedNames;
 
 const { spawn } = require("child_process");
 const path = require("path");
+exports.generateChunkGrammar = generateChunkGrammar;
+exports.extractReservedNames = extractReservedNames;
+exports.prepareCImports = prepareCImports;
 
 /**
  * Pulls every shape/action/field name already committed to the
@@ -33,14 +34,27 @@ const path = require("path");
  * never breaks a build outright).
  */
 function extractReservedNames(accumulatedSource) {
+    // PHASE 2: returns {name, kind} pairs instead of flat strings, so
+    // chunk_grammar.py's grammar generation can eventually tell "this
+    // reserved name is a shape" apart from "this one is an action" or
+    // "field" (finer per-kind rules, e.g. "field names may shadow shape
+    // names but not action names", become possible later). Kind-tagging
+    // isn't required for the current fix (C1's decl-name exclusion is
+    // flat -- any reserved name, regardless of kind, can't be reused as
+    // a new declaration's name), but chunk_grammar.py's
+    // _reserved_name_strs() accepts BOTH this form and the old flat-
+    // string form, so this is a safe, non-breaking upgrade of the
+    // payload shape -- any caller still passing flat strings keeps
+    // working unchanged.
     const src = accumulatedSource || "";
-    const names = new Set();
-    for (const m of src.matchAll(/^\s*shape\s+(\w+)/gm)) names.add(m[1]);
-    for (const m of src.matchAll(/^\s*action\s+(\w+)/gm)) names.add(m[1]);
+    const byName = new Map(); // name -> kind (first kind wins if seen more than once)
+    const add = (name, kind) => { if (!byName.has(name)) byName.set(name, kind); };
+    for (const m of src.matchAll(/^\s*shape\s+(\w+)/gm)) add(m[1], "shape");
+    for (const m of src.matchAll(/^\s*action\s+(\w+)/gm)) add(m[1], "action");
     // field names: lines inside a `shape ... holds ... end shape` block,
     // of the form `<name> as <type>` at one level of indent.
-    for (const m of src.matchAll(/^\s+(\w+)\s+as\s+/gm)) names.add(m[1]);
-    return Array.from(names);
+    for (const m of src.matchAll(/^\s+(\w+)\s+as\s+/gm)) add(m[1], "field");
+    return Array.from(byName, ([name, kind]) => ({ name, kind }));
 }
 
 /**
@@ -66,7 +80,7 @@ function extractReservedNames(accumulatedSource) {
  *         its own, since chunk_grammar.py is spawned fresh per chunk
  *         with no memory of prior chunks.
  */
-function generateChunkGrammar(ext, pythonPath, chunk, unsafe, reservedNames = [], timeoutMs = 5000) {
+function generateChunkGrammar(ext, pythonPath, chunk, unsafe, reservedNames = [], extraIdentifiers = [], timeoutMs = 5000) {
     return new Promise((resolve) => {
         let script;
         try {
@@ -81,6 +95,15 @@ function generateChunkGrammar(ext, pythonPath, chunk, unsafe, reservedNames = []
             items: (chunk.items || []).map((it) => ({ category: it.category, id: it.id, desc: it.desc })),
             unsafe: !!unsafe,
             reserved_names: Array.isArray(reservedNames) ? reservedNames : [],
+            // DISPOSABLE-RESERVE IMPORT_C: aliases (e.g. "c_sqrt") this
+            // chunk needs to be able to call even though they don't
+            // appear literally in its own plan text -- see
+            // prepareCImports() below, and chunk_grammar.py's generate()
+            // docstring for how these get folded into both `identifier`
+            // (callable) and the decl-position exclusion sets (not
+            // re-declarable). Optional/additive: an empty array here
+            // reproduces the exact previous payload shape.
+            extra_identifiers: Array.isArray(extraIdentifiers) ? extraIdentifiers : [],
         });
         let proc;
         try {
@@ -123,3 +146,96 @@ function generateChunkGrammar(ext, pythonPath, chunk, unsafe, reservedNames = []
         proc.stdin.end();
     });
 }
+
+/**
+ * DISPOSABLE-RESERVE IMPORT_C bridge. Given one chunk and the build's
+ * accumulated source so far, asks chunk_grammar.py's prepare_c_imports()
+ * for:
+ *   - importLines: ready-to-prepend, deterministic `import from C ...`
+ *     top-level statements for any KNOWN_C_IMPORTS name this chunk's
+ *     own plan text asks for that no earlier chunk already imported.
+ *   - aliasNames: the matching Dictum-visible aliases (e.g. ["c_sqrt"])
+ *     for every name this chunk needs, whether it's importing it right
+ *     now or reusing an earlier chunk's import -- pass this straight
+ *     into generateChunkGrammar's extraIdentifiers param so the SAME
+ *     chunk's grammar can legally call it.
+ *
+ * Same fail-quiet contract as generateChunkGrammar: any failure at all
+ * (spawn error, timeout, non-zero exit, unparseable stdout, ok:false)
+ * resolves to {importLines: [], aliasNames: []} -- never throws, never
+ * blocks the build. A chunk with nothing to import behaves exactly as
+ * if this function didn't exist.
+ */
+function prepareCImports(ext, pythonPath, chunk, accumulated, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+        const EMPTY = { importLines: [], aliasNames: [] };
+        let script;
+        try {
+            script = path.join(ext, "compiler", "dictumc", "chunk_grammar.py");
+        }
+        catch {
+            resolve(EMPTY);
+            return;
+        }
+        const payload = JSON.stringify({
+            chunk: {
+                tierName: chunk.tierName,
+                items: (chunk.items || []).map((it) => ({ category: it.category, id: it.id, desc: it.desc })),
+            },
+            accumulated: accumulated || "",
+        });
+        let proc;
+        try {
+            proc = spawn(pythonPath || "python3", [script, "--prepare-c-imports"], { stdio: ["pipe", "pipe", "pipe"] });
+        }
+        catch {
+            resolve(EMPTY);
+            return;
+        }
+        let out = "";
+        let errored = false;
+        const timer = setTimeout(() => {
+            errored = true;
+            try {
+                proc.kill();
+            }
+            catch { /* ignore */ }
+            resolve(EMPTY);
+        }, timeoutMs);
+        proc.stdout.on("data", (d) => { out += d.toString("utf8"); });
+        proc.stderr.on("data", () => { /* surfaced via non-zero exit below; not fatal by itself */ });
+        proc.on("error", () => {
+            if (errored)
+                return;
+            errored = true;
+            clearTimeout(timer);
+            resolve(EMPTY);
+        });
+        proc.on("close", (code) => {
+            if (errored)
+                return;
+            clearTimeout(timer);
+            if (code !== 0 || !out.trim()) {
+                resolve(EMPTY);
+                return;
+            }
+            try {
+                const parsed = JSON.parse(out);
+                if (!parsed || parsed.ok !== true) {
+                    resolve(EMPTY);
+                    return;
+                }
+                resolve({
+                    importLines: Array.isArray(parsed.import_lines) ? parsed.import_lines : [],
+                    aliasNames: Array.isArray(parsed.alias_names) ? parsed.alias_names : [],
+                });
+            }
+            catch {
+                resolve(EMPTY);
+            }
+        });
+        proc.stdin.write(payload);
+        proc.stdin.end();
+    });
+}
+exports.prepareCImports = prepareCImports;

@@ -774,6 +774,27 @@ async function _runBuild(ext) {
     }
     try {
         for (const chunk of chunks) {
+            // DISPOSABLE-RESERVE IMPORT_C: checked once per chunk, before
+            // grammar generation, the same way needsUnsafe/reservedNames
+            // are already established up front for this chunk. Zero
+            // effect on any chunk whose plan text never says "import
+            // from c" -- prepareCImports resolves to {importLines: [],
+            // aliasNames: []} immediately for those (see chunkGrammar.js),
+            // so this is strictly additive to every existing chunk type.
+            const cImports = await (0, chunkGrammar_1.prepareCImports)(ext, cfg.pythonPath, chunk, accumulated);
+            if (cImports.importLines.length) {
+                // Deterministic, never model-sampled -- appended straight
+                // to the accumulated source BEFORE this chunk's own build
+                // attempt, exactly like the skill-bindings preamble above.
+                // Committing it here (not inside _runBuildChunk) means a
+                // failed/retried attempt at THIS chunk's own body can
+                // never cause the import line itself to be duplicated or
+                // lost -- it's already a permanent part of accumulated by
+                // the time _runBuildChunk's patch/retry logic runs.
+                accumulated += cImports.importLines.join('\n') + '\n\n';
+                (0, graph_1.indexSource)((uri ? uri.fsPath : ext) + `#import-c-${chunk.index}`, cImports.importLines.join('\n'));
+                _panel.postStatus(`Chunk ${chunk.index + 1}/${chunks.length}: deterministically imported ${cImports.importLines.length} C function(s) (${cImports.aliasNames.join(', ')}) -- no model call needed for the import itself.`);
+            }
             // Per-chunk grammar: only attempted in GBNF mode (tool-mode/
             // JSON-Schema already gets its own tight schema per chunk from
             // toolSchema.js's buildChunkResponseFormat, so this would be
@@ -792,7 +813,7 @@ async function _runBuild(ext) {
                 // earlier chunk's committed output at this point in the
                 // loop -- see chunkGrammar.js's extractReservedNames.
                 const reservedNames = (0, chunkGrammar_1.extractReservedNames)(accumulated);
-                const generated = await (0, chunkGrammar_1.generateChunkGrammar)(ext, cfg.pythonPath, chunk, needsUnsafe, reservedNames);
+                const generated = await (0, chunkGrammar_1.generateChunkGrammar)(ext, cfg.pythonPath, chunk, needsUnsafe, reservedNames, cImports.aliasNames);
                 if (generated) {
                     chunkGrammar = generated;
                 }

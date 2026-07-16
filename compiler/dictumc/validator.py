@@ -961,6 +961,18 @@ class Validator:
                 else:
                     for (pname, ptype), arg in zip(sig.params, node.args):
                         self._check_handle_type_match(ptype, arg, scope, node)
+                # PHASE 1 FIX: an action whose return type is a return-type-only
+                # marker (e.g. "nothing") can't be used as a value -- mirrors the
+                # same guard validate_vardecl already applies to declared types.
+                # Without this, `call foo with X giving Result` where foo produces
+                # nothing silently type-checks here and only blows up at gcc as
+                # "variable or field 'Result' declared void" (see N10).
+                from .type_registry import non_variable_type_names
+                if sig.ret_type in non_variable_type_names():
+                    self.error(
+                        f"Action '{node.name}' produces '{sig.ret_type}' and can't be "
+                        f"used as a value here", node.line)
+                    return None
                 return sig.ret_type
             return None
         elif isinstance(node, NewExpr):
