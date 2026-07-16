@@ -1374,16 +1374,18 @@ class CppEmitter:
             self.output = includes + [""] + self.output
             self._includes_emitted = True
         if self._action_buffer:
-            # Inject after includes block
-            last_inc = -1
-            for i, ln in enumerate(self.output):
-                if ln.strip().startswith('#include'):
-                    last_inc = i
-            if last_inc >= 0:
-                inject = [''] + self._action_buffer
-                self.output = (self.output[:last_inc + 1]
-                               + inject
-                               + self.output[last_inc + 1:])
+            # BUGFIX (IMPORT_C forward-declaration ordering, mirrors the
+            # same fix in emit_c.py's get_output): this used to inject
+            # buffered action bodies right after the last #include line --
+            # i.e. BEFORE any ImportC/ExternFn `extern ...;` + wrapper
+            # lines already sitting in self.output, since those are
+            # appended directly at emit_node time rather than buffered.
+            # An action calling `call c_sqrt with ...` would then be
+            # emitted ahead of c_sqrt's own declaration, producing a
+            # "was not declared in this scope" error. Actions must be
+            # appended AFTER the existing self.output content, not
+            # spliced in right after the includes block.
+            self.output = self.output + [''] + self._action_buffer
             self._action_buffer.clear()
         self._fix_preamble_ordering()
         if self._handle_typedefs:

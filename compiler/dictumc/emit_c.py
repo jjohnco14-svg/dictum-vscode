@@ -1789,8 +1789,22 @@ class CEmitter:
             if self._handle_typedefs:
                 prelude.append("")
             prelude.extend(self._struct_buffer)
-            prelude.extend(self._action_buffer)
-            self.output = prelude + self.output
+            # BUGFIX (IMPORT_C forward-declaration ordering, module-only /
+            # no-Program files): action bodies used to be spliced into the
+            # prelude BEFORE self.output, but self.output is where ImportC/
+            # ExternFn emit their `extern ...;` + `static inline` alias
+            # wrapper (see emit_node's ImportC branch) -- those lines are
+            # appended directly, never buffered, since only Action bodies
+            # defer via _action_buffer. That ordering put every action body
+            # ahead of the C import declarations it calls into, producing an
+            # implicit-declaration warning at the call site and then a hard
+            # "conflicting types" error once the late `static inline`
+            # definition landed on top of the compiler's implicit int()
+            # guess. Actions must come AFTER self.output (imports/externs),
+            # not before, so any `call c_sqrt with ...` in an action body
+            # always sees c_sqrt's real double-typed declaration first.
+            self.output = prelude + self.output + self._action_buffer
+            self._action_buffer = []
         elif self._action_buffer:
             # Inject buffered actions after last #include line
             last_inc = -1
