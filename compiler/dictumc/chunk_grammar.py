@@ -267,7 +267,52 @@ def _check_reserved_words_sync():
 
 _check_reserved_words_sync()
 
-UNSAFE_NAMES = ("RAW_MALLOC", "RAW_FREE", "ATOMIC_FAA")
+# ---------------------------------------------------------------------
+# ROOT-CAUSE FIX (same drift class DTYPE_PHRASES/RESERVED_WORDS already
+# had to be fixed for): UNSAFE_NAMES used to be a hand-copied 3-entry
+# tuple -- a snapshot of grammar.py's real GrammarState.UNSAFE_TOKEN
+# vocabulary from whenever it was last copied by hand, not a live
+# reference to it. grammar.py's real UNSAFE_TOKEN state has since grown
+# to 60+ names (ATOMIC_CAS_*, CAS_LOOP_*/DCAS_LOOP_128, HP_* hazard-
+# pointer ops, RCU_*, SIMD_*, PUN_*, FFI_*, ALIGNED_ALLOC_*, BIT_*,
+# SWAP_ENDIAN_*, HTON_*/NTOH_*, ...) with nothing keeping this tuple in
+# sync. Any `unsafe=True` chunk whose plan item named one of those real
+# ops (anything outside the 3 this tuple knew about) had NO legal
+# unsafe-token grammar path at all -- the model fell through to
+# free-form generation and hallucinated an ordinary function call
+# (e.g. a bare `compare(...)`) instead of the real bracket-token op.
+# Deriving this tuple directly from grammar.py's own UNSAFE_TOKEN state
+# closes the drift permanently: there is now exactly ONE place
+# ('grammar.py') that defines what an unsafe op name is, and this
+# module can only ever be a live reflection of it, never a stale copy.
+# ---------------------------------------------------------------------
+def _derive_unsafe_names():
+    try:
+        from .grammar import DictumGrammar as _G, GrammarState as _GS
+    except ImportError:
+        try:
+            from grammar import DictumGrammar as _G, GrammarState as _GS
+        except ImportError:
+            # grammar.py genuinely unimportable in this environment --
+            # last-resort fallback so the module still loads standalone,
+            # NOT a claim that this list is complete.
+            return ("RAW_MALLOC", "RAW_FREE", "ATOMIC_FAA")
+    if not _G._VALID_TOKENS:
+        _G._init_valid_tokens()
+    tokens = _G._VALID_TOKENS.get(_GS.UNSAFE_TOKEN, frozenset())
+    # UNSAFE_TOKEN's valid-token set also contains non-name grammar
+    # punctuation/meta-tokens needed to parse `[TOKEN: arg : arg]`
+    # syntax generally ('<IDENTIFIER>', '<NUMBER>', '<STRING>', ':',
+    # '.', '-', '>', '[', ']'). A real unsafe op name is always
+    # ALL-CAPS with underscores, so a shape filter separates the two
+    # cleanly without a second hand-maintained exclude list -- exactly
+    # the kind of list this function exists to stop needing.
+    names = tuple(sorted(t for t in tokens if re.fullmatch(r"[A-Z][A-Z0-9_]*", t)))
+    return names or ("RAW_MALLOC", "RAW_FREE", "ATOMIC_FAA")
+
+
+UNSAFE_NAMES = _derive_unsafe_names()
+_UNSAFE_NAMES_LOWER = {n.lower() for n in UNSAFE_NAMES}
 
 # ---------------------------------------------------------------------
 # ROOT-CAUSE FIX (Cell 13, C1/C4/C8/V3 -- "redefinition of 'sqrt'",
@@ -722,7 +767,7 @@ def extract_identifiers(items):
             continue
         if lw in RESERVED_WORDS and w not in name_position:
             continue
-        if lw in ("raw_malloc", "raw_free", "atomic_faa"):
+        if lw in _UNSAFE_NAMES_LOWER:
             continue
         seen.add(lw)
         found.append(w)
@@ -819,6 +864,59 @@ def _dtype_identifier_candidates(idents, text):
     param_names = _extract_param_names(text)
     exclude = action_names | program_names | param_names
     return [c for c in idents if c not in exclude]
+
+
+def _call_target_candidates(idents, text, reserved_names=None, extra_identifiers=None):
+    """Role-scoped candidate list for call-stmt's target position --
+    distinct from the general `identifier` reference rule, which
+    doubles as call-target today and therefore also accepts any shape
+    name or parameter name mentioned anywhere in the chunk's text as a
+    legal thing to CALL (declaration-position role-scoping stopped at
+    decl-name/decl-identifier; the *reference*-position call-target
+    slot was never split out the same way). Restricts candidates to
+    names this chunk can actually know are callable:
+      - action names declared anywhere in this chunk's own text
+        (`action X ...` -- covers both a forward call to another action
+        in the same chunk and a recursive self-call)
+      - reserved_names carried over from earlier chunks in this build,
+        but ONLY entries kind-tagged "action" (see
+        _reserved_name_strs's docstring on the two accepted shapes --
+        a flat-string reserved_names list carries no kind info and
+        can't be narrowed this way)
+      - extra_identifiers (disposable-reserve IMPORT_C aliases like
+        "c_sqrt" -- these are call targets by construction, see
+        prepare_c_imports's own comment on this)
+    Falls back to the unfiltered idents list (today's behavior) when
+    none of the above yields anything, rather than to an empty or fully
+    open rule -- a build using only flat-string reserved_names, or a
+    chunk calling an action declared in an earlier chunk we have no
+    other record of, still needs to be able to name that action."""
+    action_names = set(re.findall(r"\baction\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.I))
+    kind_tagged_actions = set()
+    for n in (reserved_names or []):
+        if isinstance(n, dict) and str(n.get("kind", "")).lower() == "action" and n.get("name"):
+            kind_tagged_actions.add(str(n["name"]))
+    extra = set(extra_identifiers or [])
+    candidates = action_names | kind_tagged_actions | extra
+    if not candidates:
+        return list(idents)
+    # Preserve idents' original ordering/casing where possible; append
+    # any remainder (e.g. a kind-tagged reserved name from an earlier
+    # chunk that never appears literally in THIS chunk's own text).
+    ordered = [c for c in idents if c in candidates]
+    remainder = sorted(c for c in candidates if c not in ordered)
+    return ordered + remainder
+
+
+def _call_target_rule(candidates):
+    """Same shape as _identifier_rule, but its own rule NAME
+    (call-target) so call-stmt's target position can be role-scoped
+    independently of the general `identifier` reference rule -- see
+    _call_target_candidates."""
+    if not candidates:
+        return 'call-target   ::= [a-zA-Z_] [a-zA-Z0-9_]*'
+    lits = " | ".join(f'"{c}"' for c in candidates)
+    return f'call-target   ::= {lits}'
 
 
 def _identifier_rule(candidates):
@@ -1146,13 +1244,57 @@ _TERMINALS_BASE = (
 )
 _INTEGER_TERMINAL = f'integer       ::= {_NUMBER_DIGITS}'
 
-_UNARY = (
-    'unary         ::= "&" identifier | "*" identifier | "-" unary | primary\n'
-    'primary       ::= number | string | "true" | "false" | "nothing" | identifier'
-)
+# ---------------------------------------------------------------------
+# ROOT-CAUSE FIX: parser.py/emit_c.py/emit_cpp.py fully understand
+# FieldAccess (`Account.balance`, `World.width`, and nested chains --
+# parser.py builds `fa.obj = f"{fa.obj}.{fa.field}"` for `A.b.c`), but
+# this module had NO GBNF rule for dotted field access at all -- the
+# only literal "." anywhere in this file was the decimal-point in the
+# `number` terminal. Any INVARIANT/OPERATION chunk whose plan text
+# needs to reference a shape field (`World.width`, `Account.balance`,
+# `Gate.is_open`) was therefore structurally unsatisfiable: the model
+# had no legal grammar path to emit dotted access at all, so it fell
+# back to whatever WAS legal -- e.g. emitting a bare `Account()` call
+# instead. Not a prompting or model-capability gap; the grammar itself
+# had no path there. field-access is only appended when the chunk's
+# own text actually contains dotted-name syntax (see
+# detect_field_access/has_field_access in generate()) so chunks that
+# never need it don't pay for an extra, unreferenced rule.
+# ---------------------------------------------------------------------
+_FIELD_ACCESS_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*")
 
 
-def _stmt_rule(kinds, allow_all, decl_candidates=None):
+def detect_field_access(text):
+    """True if the chunk's plan text contains dotted field-access syntax
+    (`Shape.field`) -- anchored to [A-Za-z_] on both sides of the dot so
+    a decimal number literal like "3.14" never false-positives this."""
+    return bool(_FIELD_ACCESS_RE.search(text))
+
+
+def _unary_and_primary(include_field_access):
+    """Same shape as the old _UNARY constant, but primary conditionally
+    grows a field-access alternative -- see detect_field_access above
+    for why this can't just always be on (unreferenced-rule hygiene) or
+    always be off (the actual bug this fixes)."""
+    primary_alts = ['number', 'string', '"true"', '"false"', '"nothing"']
+    if include_field_access:
+        primary_alts.append('field-access')
+    primary_alts.append('identifier')
+    lines = [
+        'unary         ::= "&" identifier | "*" identifier | "-" unary | primary',
+        'primary       ::= ' + ' | '.join(primary_alts),
+    ]
+    if include_field_access:
+        # Bounded chain (same _CHAIN_CAP convention as call-stmt's "and"
+        # tail / arith's op tails below) instead of an unbounded "+" --
+        # this file never emits an unbounded repeat anywhere else, and
+        # real nested FieldAccess chains are always short (1-2 dots), so
+        # 4 is generous headroom, not a real limit.
+        lines.append('field-access  ::= identifier ' + _bounded_repeat('"." identifier', _CHAIN_CAP, 1))
+    return "\n".join(lines)
+
+
+def _stmt_rule(kinds, allow_all, decl_candidates=None, call_target_candidates=None):
     """simple-stmt alternation, narrowed to only the kinds actually
     detected -- ONLY used for tiers where per-item granularity is fine
     enough to trust (TYPE, MEMORY, SAFETY). See module docstring for why
@@ -1181,7 +1323,7 @@ def _stmt_rule(kinds, allow_all, decl_candidates=None):
         "keep": 'keep-stmt     ::= keep-kw " " decl-identifier " " as-kw " " dtype (" " with-value-kw " " expr)?',
         "set": 'set-stmt      ::= set-kw " " identifier " " "to" " " expr',
         "print": f'print-stmt    ::= print-kw " " "the" " " "text" " " print-arg {print_and_tail}',
-        "call": f'call-stmt     ::= call-kw " " identifier (" " "with" " " expr {call_and_tail})? (" " "giving" " " identifier)?',
+        "call": f'call-stmt     ::= call-kw " " call-target (" " "with" " " expr {call_and_tail})? (" " "giving" " " identifier)?',
         "release": 'release-stmt  ::= release-kw " " identifier',
     }
     use = set(all_kinds) if (allow_all or not kinds) else kinds
@@ -1194,6 +1336,8 @@ def _stmt_rule(kinds, allow_all, decl_candidates=None):
     if "keep" in use:
         lines.append("with-value-kw ::= " + _connector_alt_gbnf("with_value"))
         lines.append(_decl_identifier_rule(decl_candidates or []))
+    if "call" in use:
+        lines.append(_call_target_rule(call_target_candidates or []))
     return "\n".join(lines)
 
 
@@ -1528,7 +1672,8 @@ def generate(chunk):
         else:
             used_stmt_kinds = _ALL_SIMPLE_KINDS if (body_allow_all or not stmt_kinds) else stmt_kinds
             parts.append(_stmt_rule(stmt_kinds, body_allow_all,
-                                     decl_candidates=_decl_identifier_candidates(idents, text, reserved_names)))
+                                     decl_candidates=_decl_identifier_candidates(idents, text, reserved_names),
+                                     call_target_candidates=_call_target_candidates(idents, text, reserved_names, extra_identifiers)))
             parts.append("")
         needs_body2 = include_if or include_while or include_repeat or unsafe
         if needs_body2:
@@ -1575,9 +1720,10 @@ def generate(chunk):
         parts.append("")
 
     has_ptr_ops = bool(re.search(r"[&*]\s*[A-Za-z_]", text))
+    has_field_access = detect_field_access(text)
     needs_full_expr_chain = (
         body_allow_all or include_if or include_while
-        or cmp_found or arith_found or has_ptr_ops
+        or cmp_found or arith_found or has_ptr_ops or has_field_access
     )
     needs_expr = (
         body_allow_all or include_if or include_while
@@ -1592,7 +1738,7 @@ def generate(chunk):
                 parts.append('comparison    ::= additive (" " "is" " " cmp-op " " additive)?')
                 parts.append(_cmp_op_rule(cmp_found))
             parts.append(_arith_rule(arith_found))
-            parts.append(_UNARY)
+            parts.append(_unary_and_primary(has_field_access))
         if "print" in used_stmt_kinds:
             # print's argument skips the comparison layer entirely --
             # `expr` allows a trailing `is <cmp-op> <additive>` suffix
@@ -1670,7 +1816,74 @@ def _self_test():
         rule_count = len(re.findall(r"^[a-zA-Z_][a-zA-Z0-9_-]*\s*::=", g, re.MULTILINE))
         idents_line = next((l for l in g.splitlines() if l.startswith("identifier")), "")
         print(f"[{c['tierName']:<12}] rules={rule_count:<3} {idents_line[:90]}")
-    print("\nself-test OK")
+
+    # ---------------------------------------------------------------
+    # GAP 6 FIX: everything above only ever printed rule counts -- no
+    # assertion, no pass/fail signal. It would not have caught any of
+    # the UNSAFE_NAMES drift, missing field-access, or unscoped
+    # call-target bugs even run on every commit. What follows are real
+    # assertions covering exactly those three fixes.
+    # ---------------------------------------------------------------
+    failures = []
+
+    # 1) UNSAFE_NAMES must be derived from grammar.py's live vocabulary,
+    # not stuck at the old 3-entry hand-copy.
+    if len(UNSAFE_NAMES) < 10:
+        failures.append(
+            f"UNSAFE_NAMES only has {len(UNSAFE_NAMES)} entries -- looks like "
+            f"the old hand-copied 3-entry list, not derived from grammar.py")
+    for must_have in ("CAS_LOOP_32", "HP_RETIRE", "RCU_SYNCHRONIZE",
+                       "SIMD_LOAD_F32", "FFI_CALL_PTR"):
+        if must_have not in UNSAFE_NAMES:
+            failures.append(f"UNSAFE_NAMES missing '{must_have}' -- drifted from grammar.py again")
+
+    # 2) field-access must be reachable when the plan text needs it
+    # (Account.balance), and NOT emitted when it doesn't (unreferenced-
+    # rule hygiene -- see the module's own "vocabulary containment"
+    # convention used elsewhere in this file).
+    field_chunk = {"tierName": "OPERATION", "items": [
+        {"category": "OPERATION", "id": "20",
+         "desc": "action main - keep Result as whole number with value Account.balance"},
+    ]}
+    g_field = generate(field_chunk)
+    if not re.search(r"^field-access\s*::=", g_field, re.MULTILINE):
+        failures.append("field-access rule missing from a chunk whose plan text contains 'Account.balance'")
+
+    no_field_chunk = {"tierName": "TYPE", "items": [
+        {"category": "TYPE", "id": "2",
+         "desc": "shape Point holds x as whole number, y as whole number"},
+    ]}
+    g_no_field = generate(no_field_chunk)
+    if re.search(r"^field-access\s*::=", g_no_field, re.MULTILINE):
+        failures.append("field-access rule emitted for a chunk with no dotted access in its text")
+
+    # 3) call-target must be scoped to real action names, not every
+    # identifier in the chunk -- a parameter name (Player) must NOT be
+    # a legal call target even though it's a legal `identifier`.
+    call_chunk = {"tierName": "OPERATION", "items": [
+        {"category": "OPERATION", "id": "21",
+         "desc": "action main takes Player as Character - call helper with Player giving Result"},
+        {"category": "OPERATION", "id": "22",
+         "desc": "action helper takes X as whole number produces whole number - set X to X plus 1"},
+    ]}
+    g_call = generate(call_chunk)
+    m = re.search(r"^call-target\s*::=\s*(.+)$", g_call, re.MULTILINE)
+    if not m:
+        failures.append("call-target rule missing from a chunk containing a call-stmt")
+    else:
+        target_line = m.group(1)
+        if '"helper"' not in target_line:
+            failures.append("call-target rule doesn't offer 'helper', a real action name declared in this chunk")
+        if '"Player"' in target_line:
+            failures.append("call-target rule offers 'Player' (a parameter name) as a legal call target -- role-scoping regressed")
+
+    if failures:
+        print("\nSELF-TEST FAILURES:")
+        for f in failures:
+            print(f"  - {f}")
+        print(f"\n{len(failures)} assertion(s) failed.")
+        sys.exit(1)
+    print("\nself-test OK (all assertions passed)")
 
 
 def main():

@@ -247,7 +247,30 @@ class DictumGrammar:
     # time a type word was added anywhere else (see the FIX comments
     # below, kept for history) -- exactly the kind of drift this registry
     # exists to prevent.
-    from .type_registry import all_type_words
+    # ROOT-CAUSE FIX: this used to be a bare `from .type_registry import
+    # all_type_words` with no fallback -- the only import in this whole
+    # codebase that skipped the relative-then-absolute pattern every
+    # other cross-module import here uses (see chunk_grammar.py's own
+    # `try: from . import type_registry / except ImportError: import
+    # type_registry`). That mattered because chunkGrammar.js's real
+    # spawn contract spawns `python3 <full-path>/chunk_grammar.py`
+    # directly -- no `-m`, no package context -- which puts grammar.py
+    # on sys.path as a bare top-level module named "grammar", not
+    # "dictumc.grammar". A relative import at that point raises
+    # "attempted relative import with no known parent package" --
+    # confirmed live: `import grammar` (or `from .grammar import ...`)
+    # from a standalone script in this same directory hit exactly that
+    # exception at class-definition time, meaning DictumGrammar could
+    # never fully define itself in the exact invocation mode production
+    # actually uses. This silently broke every OTHER module's attempt to
+    # introspect grammar.py at runtime too -- e.g. chunk_grammar.py's
+    # own `_check_reserved_words_sync()` guard has been silently
+    # no-op-ing (caught by its own except-ImportError-and-return) in
+    # production this whole time, not just in a standalone test.
+    try:
+        from .type_registry import all_type_words
+    except ImportError:
+        from type_registry import all_type_words
     TYPE_WORDS = all_type_words()
     # Historical context (now automatic via type_registry.py):
     #   - 'unique'/'shared'/'weak'/'raw'/'pointer'/'opaque' were once
