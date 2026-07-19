@@ -1323,7 +1323,28 @@ class CEmitter:
             # parameters were never added to declared_vars, so a field
             # access on a PARAMETER (not just a local `keep` variable)
             # couldn't be type-resolved either. Register them here.
-            saved_param_types = {pname: self.declared_vars.get(pname) for pname, _ in node.params}
+            #
+            # BUGFIX (cross-action declared_vars leakage): declared_vars
+            # is a single CEmitter-instance-level dict, but each Action's
+            # locals (params AND anything the body declares via `keep` or
+            # the BUG-01 Assignment auto-declare path) live in a fresh C
+            # scope per function -- they must not stay visible to the
+            # NEXT action emitted from the same file. The previous fix
+            # only snapshotted/restored PARAM names, so a local like
+            # `Result` from `call c_sqrt with X giving Result` (auto-
+            # declared by the Assignment branch, not a param) stayed in
+            # declared_vars forever. A second, later action that also
+            # does `call c_other with Y giving Result` then saw `Result`
+            # as "already declared" and skipped emitting its type,
+            # producing `Result = c_other(Y);` with no declaration at all
+            # -- a real, confirmed "'Result' undeclared" compile error
+            # whenever two sibling actions in the same file both use the
+            # same `giving <name>` result-variable name (e.g. two
+            # IMPORT_C-calling actions both writing `giving Result`).
+            # Snapshotting the WHOLE dict and restoring it after the body
+            # is emitted fixes this for params AND locals alike, and
+            # subsumes the old params-only save/restore.
+            saved_declared_vars = dict(self.declared_vars)
             for pname, ptype in node.params:
                 self.declared_vars[pname] = self.type_to_c(ptype)
 
@@ -1349,11 +1370,7 @@ class CEmitter:
                 self.emit("}")
                 self.emit("")
             self.current_action_ret_c_type = saved_ret_c_type
-            for pname, prev in saved_param_types.items():
-                if prev is None:
-                    self.declared_vars.pop(pname, None)
-                else:
-                    self.declared_vars[pname] = prev
+            self.declared_vars = saved_declared_vars
             return
 
         # ----------------------------------------------------------------

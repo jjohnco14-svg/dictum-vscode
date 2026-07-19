@@ -7,6 +7,7 @@ exports.isRunning = isRunning;
 exports.listModels = listModels;
 exports.pull = pull;
 exports.generate = generate;
+exports.stripThinking = stripThinking;
 exports._isTransientGenerateError = _isTransientGenerateError;
 exports.setRpmLimit = setRpmLimit;
 exports.calibrate = calibrate;
@@ -14,6 +15,37 @@ exports.calibrate = calibrate;
 const http = require("http");
 const https = require("https");
 const url_1 = require("url");
+// ── Thinking-model support ──────────────────────────────────────────────────
+// Some models/providers (Qwen3-style "thinking" models in particular) can
+// prepend a <think>...</think> block of chain-of-thought reasoning before
+// the actual answer. Whether this appears is NOT under this client's
+// control per-provider -- it depends on the model, the endpoint's own
+// default, and whatever system prompt the caller sent -- so this can't be
+// solved by only handling one provider's response shape. What CAN be done
+// centrally, regardless of which of _generateOnce's 7 return paths produced
+// the text, is: check whether a <think> block is actually present, and if
+// so strip it; if not, pass the text through completely unchanged. That
+// check-then-strip-or-passthrough is deliberately NOT unconditional
+// stripping, so a model/provider that never emits <think> at all sees zero
+// behavior change.
+const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>\s*/gi;
+const UNCLOSED_THINK_RE = /<think>[\s\S]*$/i;
+function stripThinking(text) {
+    if (!text || !/<think>/i.test(text)) {
+        // No thinking tag present at all -- do the same thing: return the
+        // text exactly as received, no-op.
+        return text;
+    }
+    let out = text.replace(THINK_BLOCK_RE, '');
+    // A <think> with no matching </think> means generation was cut off
+    // (max_tokens, a stop sequence, a dropped stream) while still inside
+    // the reasoning block, before any real answer was produced. Trim that
+    // dangling fragment too, rather than handing an unterminated <think>
+    // tag to a caller (Build's normalizer/parser, Plan/Review's own
+    // parsing) that has no idea what to do with it.
+    out = out.replace(UNCLOSED_THINK_RE, '');
+    return out.trim();
+}
 // ── RPM throttling ────────────────────────────────────────────────────────────
 // Simple sliding-window limiter, keyed per (channel + provider + baseUrl).
 // FIX: the key used to be just (provider + baseUrl). That's fine when Plan/
@@ -534,7 +566,14 @@ async function generate(opts) {
     let lastErr;
     for (let attempt = 0; attempt <= TRANSIENT_RETRY_LIMIT; attempt++) {
         try {
-            return await _generateOnce(opts);
+            const raw = await _generateOnce(opts);
+            // Single choke point: every provider path in _generateOnce (7
+            // different return statements across koboldcpp/OpenAI-compat/
+            // Ollama, streamed and non-streamed) funnels through here before
+            // any caller (Build, Plan, Review, L5 fallback) sees the text.
+            // Fixing it once here means no per-provider branch can forget it,
+            // and no caller needs to remember to call it themselves.
+            return stripThinking(raw);
         }
         catch (e) {
             lastErr = e;

@@ -973,7 +973,7 @@ async function _generateChunkDictumText(ext, o) {
                 onProgress(accumulatedSoFar + text);
             },
         });
-        return text || returned || '';
+        return ollama.stripThinking(text || returned || '');
     }
     const attemptJsonSchema = _jsonSchemaSupported !== false &&
         !grammar &&
@@ -998,6 +998,11 @@ async function _generateChunkDictumText(ext, o) {
         });
         if (!rawJson && returned)
             rawJson = returned;
+        // A <think> prefix (a model reasoning before emitting the JSON
+        // object the schema asked for) would break JSON.parse outright,
+        // not just leave stray text in the result -- strip before parsing,
+        // not after.
+        rawJson = ollama.stripThinking(rawJson);
         const parsed = JSON.parse(rawJson);
         const dictumText = toolSchema_1.jsonChunkToDictum(parsed);
         _jsonSchemaSupported = true;

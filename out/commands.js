@@ -118,8 +118,13 @@ async function cmdBuild(extensionPath, panel, statusBar, approvedPlan, buildMode
         });
         if (!useStream) {
             generated = returned;
-            panel.postBuildOutput(generated);
         }
+        // Covers both branches: the streaming path accumulated its own
+        // copy from onToken (bypassing generate()'s own stripThinking), and
+        // the non-streaming path's `returned` was already stripped once by
+        // generate() but stripping again is a no-op when nothing is there.
+        generated = ollama.stripThinking(generated);
+        panel.postBuildOutput(generated);
         const l2 = (0, validator_1.checkL2Structural)(generated, approvedPlan);
         const violations = (0, validator_1.checkL3)(generated);
         if (currentFileUri)
